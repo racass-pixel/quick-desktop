@@ -11,6 +11,7 @@ import '../features/settings/widgets/profile_modal.dart';
 import '../features/settings/widgets/sidebar_drawer.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
+import '../widgets/toast_layer.dart';
 import 'conversation_list.dart';
 import 'widgets/avatar.dart';
 
@@ -39,8 +40,10 @@ class _MainShellState extends ConsumerState<MainShell> {
     final me = ref.watch(authControllerProvider).user;
     final settingsUsersApi = ref.read(settingsUsersApiProvider);
     final groupsApi = ref.read(groupsApiProvider);
-    return Scaffold(
-      body: Row(
+    return Stack(
+      children: [
+        Scaffold(
+          body: Row(
         children: [
           SizedBox(
             width: 360,
@@ -177,6 +180,11 @@ class _MainShellState extends ConsumerState<MainShell> {
           Expanded(child: widget.child),
         ],
       ),
+        ),
+        // Toast overlay floats above everything in the shell. It is hit-test
+        // transparent except on its own widgets (the cards use InkWell).
+        const ToastLayer(),
+      ],
     );
   }
 }
