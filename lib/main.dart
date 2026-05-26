@@ -2,9 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'features/calls/screens/call_screen.dart';
+import 'features/calls/state/call_state.dart';
+import 'features/calls/state/group_call_state.dart';
+import 'features/calls/widgets/call_pip.dart';
+import 'features/calls/widgets/incoming_call_dialog.dart';
 import 'router.dart';
 import 'state/providers.dart';
 import 'theme/theme.dart';
+import 'widgets/update_banner.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +45,8 @@ class _QuickAppState extends ConsumerState<QuickApp> {
     // and redirects to /login or the main shell once we know.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(authControllerProvider.notifier).bootstrap();
+      // Touch the updater provider so the polling loop spins up.
+      ref.read(updaterServiceProvider);
     });
   }
 
@@ -67,6 +75,37 @@ class _QuickAppState extends ConsumerState<QuickApp> {
       theme: buildAppTheme(),
       debugShowCheckedModeBanner: false,
       routerConfig: router,
+      builder: (context, child) {
+        final updater = ref.read(updaterServiceProvider);
+        final call = ref.watch(callNotifierProvider);
+        final group = ref.watch(groupCallNotifierProvider);
+        final inCall = call.lifecycle == CallLifecycle.active ||
+            call.lifecycle == CallLifecycle.ringingOut;
+        final inGroup = group.lifecycle == GroupCallLifecycle.active;
+        final minimized = (inCall && call.isMinimized) ||
+            (inGroup && group.isMinimized);
+        final showCallFullScreen = (inCall || inGroup) && !minimized;
+        return Column(
+          children: [
+            UpdateBanner(service: updater),
+            Expanded(
+              child: Stack(
+                children: [
+                  child ?? const SizedBox.shrink(),
+                  if (showCallFullScreen)
+                    Positioned.fill(
+                      child: CallScreen(call: call, group: group),
+                    ),
+                  // Floating pip when an active call is minimized.
+                  CallPip(call: call, group: group),
+                  // Incoming-call modal — visible only while ringing in.
+                  IncomingCallOverlay(call: call),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
