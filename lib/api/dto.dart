@@ -47,6 +47,64 @@ class Presence {
       );
 }
 
+class Attachment {
+  const Attachment({
+    required this.fileId,
+    required this.kind,
+    required this.mime,
+    required this.sizeBytes,
+    this.filename = '',
+    this.width = 0,
+    this.height = 0,
+    this.thumbnailUrl = '',
+  });
+
+  // 'image' | 'file' (anything that isn't image-like)
+  final String kind;
+  final String fileId;
+  final String mime;
+  final int sizeBytes;
+  final String filename;
+  final int width;
+  final int height;
+  final String thumbnailUrl;
+
+  factory Attachment.fromJson(Map<String, dynamic> j) => Attachment(
+        fileId: (j['fileId'] as String?) ?? (j['file_id'] as String?) ?? '',
+        kind: (j['kind'] as String?) ?? 'file',
+        mime: (j['mime'] as String?) ?? '',
+        sizeBytes: _intOr(j['sizeBytes'] ?? j['size_bytes'] ?? j['size'], 0),
+        filename: (j['filename'] as String?) ?? (j['name'] as String?) ?? '',
+        width: _intOr(j['width'], 0),
+        height: _intOr(j['height'], 0),
+        thumbnailUrl: (j['thumbnailUrl'] as String?) ??
+            (j['thumbnail_url'] as String?) ??
+            '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'fileId': fileId,
+        'kind': kind,
+        'mime': mime,
+        'sizeBytes': sizeBytes,
+        if (filename.isNotEmpty) 'filename': filename,
+        if (width > 0) 'width': width,
+        if (height > 0) 'height': height,
+        if (thumbnailUrl.isNotEmpty) 'thumbnailUrl': thumbnailUrl,
+      };
+}
+
+class Reaction {
+  const Reaction({required this.userId, required this.emoji});
+  final String userId;
+  final String emoji;
+
+  factory Reaction.fromJson(Map<String, dynamic> j) => Reaction(
+        userId: (j['userId'] as String?) ?? (j['user_id'] as String?) ?? '',
+        emoji: (j['emoji'] as String?) ?? '',
+      );
+}
+
 class Message {
   Message({
     required this.id,
@@ -60,6 +118,12 @@ class Message {
     this.voice,
     this.encrypted,
     this.displayBody = '',
+    this.replyToMessageId,
+    this.forwardFromUserId,
+    this.forwardFromMessageId,
+    this.forwardOriginText = '',
+    this.attachments = const <Attachment>[],
+    this.reactions = const <Reaction>[],
   });
 
   final String id;
@@ -82,6 +146,13 @@ class Message {
   // Local-only: the rendered text the UI should show. For plaintext rows it
   // mirrors `body`; for sealed rows it holds the decrypted result.
   final String displayBody;
+  // Reply / forward / attachment / reaction metadata. Empty when absent.
+  final String? replyToMessageId;
+  final String? forwardFromUserId;
+  final String? forwardFromMessageId;
+  final String forwardOriginText;
+  final List<Attachment> attachments;
+  final List<Reaction> reactions;
 
   // Convenience: best body for rendering. Falls back through displayBody ->
   // body so legacy plaintext keeps working unchanged.
@@ -97,6 +168,8 @@ class Message {
     String? kind,
     VoicePayload? voice,
     String? displayBody,
+    List<Reaction>? reactions,
+    List<Attachment>? attachments,
   }) =>
       Message(
         id: id ?? this.id,
@@ -110,6 +183,12 @@ class Message {
         voice: voice ?? this.voice,
         encrypted: encrypted,
         displayBody: displayBody ?? this.displayBody,
+        replyToMessageId: replyToMessageId,
+        forwardFromUserId: forwardFromUserId,
+        forwardFromMessageId: forwardFromMessageId,
+        forwardOriginText: forwardOriginText,
+        attachments: attachments ?? this.attachments,
+        reactions: reactions ?? this.reactions,
       );
 
   factory Message.fromJson(Map<String, dynamic> j) {
@@ -125,6 +204,24 @@ class Message {
     if (kind.isEmpty) {
       kind = voice != null ? 'voice' : 'text';
     }
+    final attsRaw = j['attachments'];
+    final attachments = <Attachment>[];
+    if (attsRaw is List) {
+      for (final a in attsRaw) {
+        if (a is Map) {
+          attachments.add(Attachment.fromJson(a.cast<String, dynamic>()));
+        }
+      }
+    }
+    final reactsRaw = j['reactions'];
+    final reactions = <Reaction>[];
+    if (reactsRaw is List) {
+      for (final r in reactsRaw) {
+        if (r is Map) {
+          reactions.add(Reaction.fromJson(r.cast<String, dynamic>()));
+        }
+      }
+    }
     return Message(
       id: (j['id'] as String?) ?? '',
       conversationId: (j['conversationId'] as String?) ?? '',
@@ -134,6 +231,17 @@ class Message {
       kind: kind,
       voice: voice,
       encrypted: encrypted,
+      replyToMessageId: (j['replyToMessageId'] as String?) ??
+          (j['reply_to_message_id'] as String?),
+      forwardFromUserId: (j['forwardFromUserId'] as String?) ??
+          (j['forward_from_user_id'] as String?),
+      forwardFromMessageId: (j['forwardFromMessageId'] as String?) ??
+          (j['forward_from_message_id'] as String?),
+      forwardOriginText: (j['forwardOriginText'] as String?) ??
+          (j['forward_origin_text'] as String?) ??
+          '',
+      attachments: attachments,
+      reactions: reactions,
     );
   }
 }

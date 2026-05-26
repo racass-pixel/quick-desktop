@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/connect.dart';
 import '../api/dto.dart';
+import '../api/media_upload.dart';
 import '../api/realtime.dart';
 import '../api/services.dart';
 import '../api/session_store.dart';
@@ -42,6 +43,11 @@ final authApiProvider = Provider<AuthApi>((ref) => AuthApi(ref.read(connectClien
 final usersApiProvider = Provider<UsersApi>((ref) => UsersApi(ref.read(connectClientProvider)));
 final messagingApiProvider =
     Provider<MessagingApi>((ref) => MessagingApi(ref.read(connectClientProvider)));
+
+final mediaUploaderProvider = Provider<MediaUploader>((ref) {
+  final c = ref.read(connectClientProvider);
+  return MediaUploader(baseUrl: apiBaseUrl, tokenProvider: () => c.token);
+});
 
 // E2E identity + conversation key plumbing. Created once per app lifetime
 // (the key store reads from flutter_secure_storage, the conv cache holds the

@@ -234,6 +234,8 @@ class MessagingApi {
     Uint8List? encryptedCiphertext,
     Uint8List? encryptedNonce,
     String? encryptedSenderKeyId,
+    String? replyToMessageId,
+    List<String> attachmentFileIds = const <String>[],
   }) async {
     final payload = <String, dynamic>{
       'conversationId': conversationId,
@@ -248,10 +250,81 @@ class MessagingApi {
           'senderKeyId': encryptedSenderKeyId,
       };
     }
+    if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
+      payload['replyToMessageId'] = replyToMessageId;
+    }
+    if (attachmentFileIds.isNotEmpty) {
+      payload['attachmentFileIds'] = attachmentFileIds;
+    }
     final res = await _c.call('quick.v1.Messaging', 'SendMessage', payload);
     return Message.fromJson(
       (res['message'] as Map?)?.cast<String, dynamic>() ?? const {},
     );
+  }
+
+  // --- Reactions / Forward / Search ---
+
+  Future<void> addReaction(String messageId, String emoji) async {
+    await _c.call('quick.v1.Messaging', 'AddReaction', {
+      'messageId': messageId,
+      'emoji': emoji,
+    });
+  }
+
+  Future<void> removeReaction(String messageId, String emoji) async {
+    await _c.call('quick.v1.Messaging', 'RemoveReaction', {
+      'messageId': messageId,
+      'emoji': emoji,
+    });
+  }
+
+  Future<List<Reaction>> listReactions(String messageId) async {
+    final res = await _c.call('quick.v1.Messaging', 'ListReactions', {
+      'messageId': messageId,
+    });
+    final list = (res['reactions'] as List?) ?? const [];
+    return list
+        .whereType<Map>()
+        .map((m) => Reaction.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<Message> forwardMessage(
+    String sourceMessageId,
+    String targetConversationId,
+  ) async {
+    final res = await _c.call('quick.v1.Messaging', 'ForwardMessage', {
+      'sourceMessageId': sourceMessageId,
+      'targetConversationId': targetConversationId,
+    });
+    return Message.fromJson(
+      (res['message'] as Map?)?.cast<String, dynamic>() ?? const {},
+    );
+  }
+
+  Future<List<Message>> searchMessages({
+    required String query,
+    String? conversationId,
+    int limit = 30,
+    String? beforeId,
+  }) async {
+    final body = <String, dynamic>{
+      'query': query,
+      'limit': limit,
+    };
+    if (conversationId != null && conversationId.isNotEmpty) {
+      body['conversationId'] = conversationId;
+    }
+    if (beforeId != null && beforeId.isNotEmpty) {
+      body['beforeId'] = beforeId;
+    }
+    final res =
+        await _c.call('quick.v1.Messaging', 'SearchMessages', body);
+    final list = (res['messages'] as List?) ?? const [];
+    return list
+        .whereType<Map>()
+        .map((m) => Message.fromJson(m.cast<String, dynamic>()))
+        .toList();
   }
 
   Future<void> markRead(String conversationId, String lastMessageId) async {

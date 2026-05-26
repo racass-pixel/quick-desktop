@@ -30,6 +30,9 @@ class ChatsState {
     this.loadingConvs = false,
     this.loadingMessages = const {},
     this.activeConvId,
+    this.replyTargets = const {},
+    this.pulseMessageId,
+    this.pulseTick = 0,
   });
 
   final List<String> order;
@@ -39,6 +42,12 @@ class ChatsState {
   final bool loadingConvs;
   final Map<String, bool> loadingMessages;
   final String? activeConvId;
+  // convId -> messageId the user is currently replying to.
+  final Map<String, String> replyTargets;
+  // Short-lived highlight signal. The UI listens on (pulseMessageId, pulseTick)
+  // and runs a one-second flash on a matching bubble.
+  final String? pulseMessageId;
+  final int pulseTick;
 
   ChatsState copyWith({
     List<String>? order,
@@ -49,6 +58,9 @@ class ChatsState {
     Map<String, bool>? loadingMessages,
     String? activeConvId,
     bool clearActive = false,
+    Map<String, String>? replyTargets,
+    String? pulseMessageId,
+    int? pulseTick,
   }) =>
       ChatsState(
         order: order ?? this.order,
@@ -58,6 +70,9 @@ class ChatsState {
         loadingConvs: loadingConvs ?? this.loadingConvs,
         loadingMessages: loadingMessages ?? this.loadingMessages,
         activeConvId: clearActive ? null : (activeConvId ?? this.activeConvId),
+        replyTargets: replyTargets ?? this.replyTargets,
+        pulseMessageId: pulseMessageId ?? this.pulseMessageId,
+        pulseTick: pulseTick ?? this.pulseTick,
       );
 }
 
@@ -375,6 +390,102 @@ class ChatsController extends StateNotifier<ChatsState> {
     }
   }
 
+  // --- reply target / pulse / forward / reactions / rich send -------------
+
+  void setReplyTarget(String convId, String? messageId) {
+    final next = {...state.replyTargets};
+    if (messageId == null || messageId.isEmpty) {
+      next.remove(convId);
+    } else {
+      next[convId] = messageId;
+    }
+    state = state.copyWith(replyTargets: next);
+  }
+
+  String? replyTargetFor(String convId) => state.replyTargets[convId];
+
+  void pulseMessage(String messageId) {
+    state = state.copyWith(
+      pulseMessageId: messageId,
+      pulseTick: state.pulseTick + 1,
+    );
+  }
+
+  // Bypass-E2E send used for replies + attachments. TODO: reuse the
+  // `_encryptForConv` path once the wire schema supports sealing reply/attachment
+  // metadata. For now we send plaintext bodies so the new features work end to
+  // end while encryption support is being threaded through.
+  Future<void> sendRich({
+    required String convId,
+    String body = '',
+    String? replyToMessageId,
+    List<String> attachmentFileIds = const <String>[],
+  }) async {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty && attachmentFileIds.isEmpty) return;
+    final me = _ref.read(authControllerProvider).user;
+    final tempId = 'tmp_${DateTime.now().microsecondsSinceEpoch}';
+    final now = DateTime.now();
+    final pending = Message(
+      id: tempId,
+      conversationId: convId,
+      senderId: me?.id ?? '',
+      body: trimmed,
+      createdAt: now,
+      status: MessageStatus.pending,
+      tempId: tempId,
+      displayBody: trimmed,
+      replyToMessageId: replyToMessageId,
+    );
+    final existing = state.messages[convId] ?? const <Message>[];
+    state = state.copyWith(
+      messages: {...state.messages, convId: [...existing, pending]},
+    );
+    try {
+      final real = await _api.sendMessage(
+        convId,
+        trimmed,
+        replyToMessageId: replyToMessageId,
+        attachmentFileIds: attachmentFileIds,
+      );
+      _swapPendingWithReal(convId, tempId, real);
+      final store = LocalStore.instanceOrNull;
+      if (store != null) {
+        // ignore: discarded_futures
+        store.persistMessage(real);
+      }
+      // Clear reply target on success.
+      if (replyToMessageId != null) setReplyTarget(convId, null);
+    } catch (_) {
+      _markFailed(convId, tempId);
+    }
+  }
+
+  Future<Message?> forwardMessage(
+    String sourceMessageId,
+    String targetConvId,
+  ) async {
+    try {
+      final m = await _api.forwardMessage(sourceMessageId, targetConvId);
+      // Optimistically attach to target thread; WS will dedupe on echo.
+      final existing = state.messages[targetConvId] ?? const <Message>[];
+      if (!existing.any((x) => x.id == m.id)) {
+        state = state.copyWith(
+          messages: {...state.messages, targetConvId: [...existing, m]},
+        );
+        _updateConvPreview(targetConvId, m, isOwn: true);
+        final store = LocalStore.instanceOrNull;
+        if (store != null) {
+          // ignore: discarded_futures
+          store.persistMessage(m);
+        }
+      }
+      return m;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> markRead(String convId, String lastMsgId) async {
     try {
       await _api.markRead(convId, lastMsgId);
@@ -400,6 +511,12 @@ class ChatsController extends StateNotifier<ChatsState> {
         break;
       case 'voice_played':
         _applyVoicePlayed(env);
+        break;
+      case 'reaction_added':
+        _applyReaction(env, removed: false);
+        break;
+      case 'reaction_removed':
+        _applyReaction(env, removed: true);
         break;
       case 'typing':
       case 'conversation_added':
@@ -491,6 +608,43 @@ class ChatsController extends StateNotifier<ChatsState> {
           byId: {...state.byId, convId: conv.copyWith(unreadCount: 0)},
         );
       }
+    }
+  }
+
+  void applyReaction(WsEnvelope env) => _applyReaction(env, removed: false);
+
+  void _applyReaction(WsEnvelope env, {required bool removed}) {
+    final convId = (env['conversation_id'] as String?) ??
+        (env['conversationId'] as String?) ??
+        '';
+    final msgId = (env['message_id'] as String?) ??
+        (env['messageId'] as String?) ??
+        '';
+    final userId =
+        (env['user_id'] as String?) ?? (env['userId'] as String?) ?? '';
+    final emoji = (env['emoji'] as String?) ?? '';
+    if (msgId.isEmpty || emoji.isEmpty || userId.isEmpty) return;
+    // We don't always know which conv the message lives in over WS — when
+    // convId is missing, scan all open threads.
+    final entries = state.messages.entries
+        .where((e) => convId.isEmpty || e.key == convId);
+    for (final e in entries) {
+      final idx = e.value.indexWhere((m) => m.id == msgId);
+      if (idx < 0) continue;
+      final m = e.value[idx];
+      final next = [...m.reactions];
+      if (removed) {
+        next.removeWhere((r) => r.userId == userId && r.emoji == emoji);
+      } else {
+        if (!next.any((r) => r.userId == userId && r.emoji == emoji)) {
+          next.add(Reaction(userId: userId, emoji: emoji));
+        }
+      }
+      final patched = m.copyWith(reactions: next);
+      final list = [...e.value];
+      list[idx] = patched;
+      state = state.copyWith(messages: {...state.messages, e.key: list});
+      return;
     }
   }
 
