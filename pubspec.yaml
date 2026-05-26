@@ -38,7 +38,7 @@ dependencies:
   livekit_client: ^2.4.3
 
   # voice feature
-  record: ^5.2.1
+  record: ^6.0.0
   just_audio: ^0.9.42
   permission_handler: ^11.3.1
 
