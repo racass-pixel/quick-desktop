@@ -19,6 +19,7 @@ import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../api/calls_api.dart';
+import '../widgets/screen_share_picker.dart';
 
 enum GroupCallLifecycle { none, active }
 
@@ -36,6 +37,9 @@ class GroupCallNotifier extends ChangeNotifier {
   bool isVideo = false;
   bool isScreenSharing = false;
   bool isMinimized = false;
+
+  /// Snapshot of the in-flight screen share — drives the active-state badge.
+  ScreenShareConfig? screenShareConfig;
 
   /// Banner cache. Keyed by conversation id; populated by refreshActive and
   /// mutated incrementally via WS envelopes.
@@ -131,6 +135,7 @@ class GroupCallNotifier extends ChangeNotifier {
     isAudio = true;
     isVideo = false;
     isScreenSharing = false;
+    screenShareConfig = null;
     _refreshRemotes();
     notifyListeners();
   }
@@ -237,24 +242,25 @@ class GroupCallNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> startScreenShare() async {
+  Future<void> startScreenShare(ScreenShareConfig config) async {
     final lp = _local;
     if (lp == null || isScreenSharing) return;
     try {
-      // See CallNotifier.startScreenShare for the anti-echo gotcha on Windows.
-      // TODO(calls-anti-echo): plumb a desktop-source picker and a virtual-cable hint.
       await lp.setScreenShareEnabled(
         true,
-        captureScreenAudio: true,
-        screenShareCaptureOptions: const ScreenShareCaptureOptions(
-          captureScreenAudio: true,
-          maxFrameRate: 30,
-          params: VideoParametersPresets.screenShareH1080FPS15,
+        captureScreenAudio: config.captureAudio,
+        screenShareCaptureOptions: ScreenShareCaptureOptions(
+          captureScreenAudio: config.captureAudio,
+          sourceId: config.sourceId,
+          maxFrameRate: config.fps.toDouble(),
+          params: config.videoParameters,
         ),
       );
       isScreenSharing = true;
+      screenShareConfig = config;
     } catch (_) {
       isScreenSharing = false;
+      screenShareConfig = null;
     }
     notifyListeners();
   }
@@ -264,6 +270,7 @@ class GroupCallNotifier extends ChangeNotifier {
     if (lp == null) return;
     try { await lp.setScreenShareEnabled(false); } catch (_) {/* ignore */}
     isScreenSharing = false;
+    screenShareConfig = null;
     notifyListeners();
   }
 
@@ -363,6 +370,7 @@ class GroupCallNotifier extends ChangeNotifier {
     isAudio = true;
     isVideo = false;
     isScreenSharing = false;
+    screenShareConfig = null;
     isMinimized = false;
     remotes.clear();
     activeSpeakers.clear();

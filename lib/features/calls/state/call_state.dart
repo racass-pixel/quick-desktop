@@ -23,6 +23,7 @@ import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../api/calls_api.dart';
+import '../widgets/screen_share_picker.dart';
 
 enum CallLifecycle { idle, ringingOut, incoming, active }
 
@@ -66,6 +67,10 @@ class CallNotifier extends ChangeNotifier {
   bool isMinimized = false;
   DateTime? startedAt;
 
+  /// Snapshot of the in-flight screen share — used for the active-state badge
+  /// in the call screen so the user can see (and stop) what's being shared.
+  ScreenShareConfig? screenShareConfig;
+
   Room? _room;
   LocalParticipant? _local;
   EventsListener<RoomEvent>? _listener;
@@ -90,6 +95,7 @@ class CallNotifier extends ChangeNotifier {
     isVideo = false;
     isAudio = true;
     isScreenSharing = false;
+    screenShareConfig = null;
     isMinimized = false;
     remotes.clear();
     activeSpeakers.clear();
@@ -176,6 +182,7 @@ class CallNotifier extends ChangeNotifier {
     isAudio = true;
     isVideo = publishVideo;
     isScreenSharing = false;
+    screenShareConfig = null;
     // Snapshot any pre-existing remotes (we may join after the peer).
     remotes
       ..clear()
@@ -278,34 +285,30 @@ class CallNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Start a screen share with system audio. Anti-echo (the web's
-  /// `suppressLocalAudioPlayback` trick) doesn't have a direct equivalent in
-  /// the livekit_client Dart SDK on Windows — see the gotcha below.
-  Future<void> startScreenShare() async {
+  /// Start a screen share using a config produced by the source picker.
+  /// Anti-echo (the web's `suppressLocalAudioPlayback` trick) doesn't have a
+  /// direct equivalent in the livekit_client Dart SDK on Windows — the picker
+  /// surfaces a tip and steers users toward sharing a window instead.
+  Future<void> startScreenShare(ScreenShareConfig config) async {
     final lp = _local;
     if (lp == null || isScreenSharing) return;
     try {
-      // On Windows, livekit_client uses flutter-webrtc's getDisplayMedia. The
-      // captureScreenAudio flag is honored by the underlying WebRTC layer; the
-      // user gets a desktop-capture picker and (when sharing the entire screen)
-      // a "share audio" checkbox. Sharing a single window vs the whole screen
-      // is the most reliable anti-echo workaround until flutter-webrtc exposes
-      // an analog of the browser's suppressLocalAudioPlayback constraint.
-      // TODO(calls-anti-echo): plumb a desktop-source picker UI and a
-      // virtual-cable hint when system audio is captured.
       await lp.setScreenShareEnabled(
         true,
-        captureScreenAudio: true,
-        screenShareCaptureOptions: const ScreenShareCaptureOptions(
-          captureScreenAudio: true,
-          maxFrameRate: 30,
-          params: VideoParametersPresets.screenShareH1080FPS15,
+        captureScreenAudio: config.captureAudio,
+        screenShareCaptureOptions: ScreenShareCaptureOptions(
+          captureScreenAudio: config.captureAudio,
+          sourceId: config.sourceId,
+          maxFrameRate: config.fps.toDouble(),
+          params: config.videoParameters,
         ),
       );
       isScreenSharing = true;
+      screenShareConfig = config;
     } catch (_) {
       // User cancelled the picker or capture failed — stay off.
       isScreenSharing = false;
+      screenShareConfig = null;
     }
     notifyListeners();
   }
@@ -315,6 +318,7 @@ class CallNotifier extends ChangeNotifier {
     if (lp == null) return;
     try { await lp.setScreenShareEnabled(false); } catch (_) {/* ignore */}
     isScreenSharing = false;
+    screenShareConfig = null;
     notifyListeners();
   }
 
