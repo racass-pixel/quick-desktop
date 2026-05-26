@@ -100,6 +100,12 @@ class AuthController extends StateNotifier<AuthState> {
     _ref.read(chatsControllerProvider.notifier).loadConversations();
   }
 
+  // Used by Settings on successful profile save — mirror the fresh User into
+  // auth state so the shell rerenders with the new name/handle/bio.
+  void setUser(User user) {
+    state = state.copyWith(user: user);
+  }
+
   Future<void> signOut() async {
     try {
       await _ref.read(authApiProvider).logout();

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'features/settings/screens/settings_screen.dart';
 import 'state/providers.dart';
 import 'ui/chat_view.dart';
 import 'ui/empty_chat.dart';
@@ -52,15 +53,39 @@ GoRouter buildRouter(WidgetRef ref) {
           ),
           GoRoute(
             path: '/settings',
-            builder: (_, __) => Container(
-              color: const Color(0xFF0F1014),
-              alignment: Alignment.center,
-              child: const Text('Settings — coming soon',
-                  style: TextStyle(color: Color(0xFFA6A8B5))),
-            ),
+            builder: (ctx, __) => _SettingsHost(ctx: ctx),
           ),
         ],
       ),
     ],
   );
+}
+
+class _SettingsHost extends ConsumerWidget {
+  const _SettingsHost({required this.ctx});
+  final BuildContext ctx;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(authControllerProvider);
+    final me = auth.user;
+    if (me == null) {
+      // Should never happen — redirect guards keep us authenticated here.
+      return const SizedBox.shrink();
+    }
+    return SettingsScreen(
+      me: me,
+      email: '',
+      usersApi: ref.read(settingsUsersApiProvider),
+      onLogout: () async {
+        await ref.read(authControllerProvider.notifier).signOut();
+        if (context.mounted) context.go('/login');
+      },
+      onUserUpdated: (u) {
+        // Mirror the freshly-saved user into auth state so the shell rerenders
+        // with the new display name / handle / bio.
+        ref.read(authControllerProvider.notifier).setUser(u);
+      },
+      onBack: () => context.go('/'),
+    );
+  }
 }
