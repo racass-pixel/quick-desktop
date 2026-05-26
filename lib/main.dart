@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
@@ -8,7 +10,9 @@ import 'features/calls/state/group_call_state.dart';
 import 'features/calls/widgets/call_pip.dart';
 import 'features/calls/widgets/incoming_call_dialog.dart';
 import 'router.dart';
+import 'services/tray.dart';
 import 'state/providers.dart';
+import 'state/window_focus.dart';
 import 'theme/theme.dart';
 import 'widgets/update_banner.dart';
 
@@ -24,6 +28,9 @@ Future<void> main() async {
       titleBarStyle: TitleBarStyle.normal,
     ),
     () async {
+      // Intercept the X button — the listener hides the window instead of
+      // closing the process. See _AppWindowListener below.
+      await windowManager.setPreventClose(true);
       await windowManager.show();
       await windowManager.focus();
     },
@@ -37,21 +44,91 @@ class QuickApp extends ConsumerStatefulWidget {
   ConsumerState<QuickApp> createState() => _QuickAppState();
 }
 
-class _QuickAppState extends ConsumerState<QuickApp> {
+class _QuickAppState extends ConsumerState<QuickApp> with WindowListener {
   @override
   void initState() {
     super.initState();
+    windowManager.addListener(this);
     // Kick off the session bootstrap. The router watches the resulting state
     // and redirects to /login or the main shell once we know.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       ref.read(authControllerProvider.notifier).bootstrap();
       // Touch the updater provider so the polling loop spins up.
       ref.read(updaterServiceProvider);
+      // Tray with bound callbacks. Open = show + focus, Quit = real exit.
+      await TrayService.instance.init(
+        onOpen: _restoreWindow,
+        onQuit: _quitApp,
+      );
+      // Seed the focused flag from the current state.
+      try {
+        final focused = await windowManager.isFocused();
+        ref.read(windowFocusedProvider.notifier).state = focused;
+      } catch (_) {/* ignore */}
     });
   }
 
   @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
+
+  Future<void> _restoreWindow() async {
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {/* ignore */}
+  }
+
+  Future<void> _quitApp() async {
+    // True exit pathway — invoked from the tray's "Quit Quick" entry.
+    try {
+      await TrayService.instance.dispose();
+    } catch (_) {/* ignore */}
+    try {
+      ref.read(realtimeProvider).disconnect();
+    } catch (_) {/* ignore */}
+    try {
+      await windowManager.setPreventClose(false);
+    } catch (_) {/* ignore */}
+    try {
+      await windowManager.destroy();
+    } catch (_) {/* ignore */}
+    exit(0);
+  }
+
+  // ---- WindowListener ----
+
+  @override
+  void onWindowClose() async {
+    // Telegram-style minimize-to-tray. The user gets the tray icon as the
+    // affordance to re-open; background WS keeps ringing calls alive.
+    try {
+      await windowManager.hide();
+    } catch (_) {/* ignore */}
+  }
+
+  @override
+  void onWindowFocus() {
+    if (!mounted) return;
+    ref.read(windowFocusedProvider.notifier).state = true;
+  }
+
+  @override
+  void onWindowBlur() {
+    if (!mounted) return;
+    ref.read(windowFocusedProvider.notifier).state = false;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // Keep tooltip in sync with the logged-in handle.
+    ref.listen(authControllerProvider, (prev, next) {
+      final u = next.user;
+      // ignore: discarded_futures
+      TrayService.instance.updateTooltip(u == null ? 'Quick' : 'Quick — @${u.handle}');
+    });
     final auth = ref.watch(authControllerProvider);
     if (auth.boot == BootState.booting) {
       return MaterialApp(
@@ -109,3 +186,4 @@ class _QuickAppState extends ConsumerState<QuickApp> {
     );
   }
 }
+
