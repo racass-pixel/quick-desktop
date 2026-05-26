@@ -499,7 +499,7 @@ class _Bubble extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  message.body,
+                  message.renderedBody,
                   style: const TextStyle(
                     color: AppColors.ink1,
                     fontSize: 14,

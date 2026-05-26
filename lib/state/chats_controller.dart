@@ -8,14 +8,18 @@
 // handled this pass; other kinds are logged and ignored.
 
 import 'dart:async';
+import 'dart:typed_data';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/dto.dart';
 import '../api/realtime.dart';
 import '../api/services.dart';
+import '../crypto/conv_keys.dart';
+import '../crypto/crypto.dart';
 import '../store/local_store.dart';
-import 'providers.dart' show messagingApiProvider, realtimeProvider, authControllerProvider;
+import 'providers.dart' show messagingApiProvider, realtimeProvider, authControllerProvider, convKeyCacheProvider;
 
 class ChatsState {
   ChatsState({
@@ -176,6 +180,11 @@ class ChatsController extends StateNotifier<ChatsState> {
         messages: {...state.messages, convId: merged},
         hasMore: {...state.hasMore, convId: res.hasMore},
       );
+      // Decrypt any sealed rows in the freshly-merged list. Best-effort —
+      // failures degrade to "[encrypted]" placeholders rather than crashing
+      // the chat view.
+      // ignore: discarded_futures
+      _decryptPage(convId);
       // Write-through: persist the freshly-arrived rows.
       if (store != null && fresh.isNotEmpty) {
         // ignore: discarded_futures
@@ -214,21 +223,43 @@ class ChatsController extends StateNotifier<ChatsState> {
     if (trimmed.isEmpty) return;
     final me = _ref.read(authControllerProvider).user;
     final tempId = 'tmp_${DateTime.now().microsecondsSinceEpoch}';
+    final now = DateTime.now();
     final pending = Message(
       id: tempId,
       conversationId: convId,
       senderId: me?.id ?? '',
       body: trimmed,
-      createdAt: DateTime.now(),
+      createdAt: now,
       status: MessageStatus.pending,
       tempId: tempId,
+      displayBody: trimmed,
     );
     final existing = state.messages[convId] ?? const <Message>[];
     state = state.copyWith(
       messages: {...state.messages, convId: [...existing, pending]},
     );
     try {
-      final real = await _api.sendMessage(convId, trimmed);
+      // Try the encrypted path. Falls back to plaintext when the peer hasn't
+      // uploaded an identity key yet or when key derivation fails for any
+      // reason — the user can still chat with legacy clients.
+      Message real;
+      final sealed = await _encryptForConv(convId, trimmed, now);
+      if (sealed != null) {
+        real = await _api.sendMessage(
+          convId,
+          '',
+          encryptedCiphertext: Uint8List.fromList(sealed.ciphertext),
+          encryptedNonce: Uint8List.fromList(sealed.nonce),
+        );
+      } else {
+        real = await _api.sendMessage(convId, trimmed);
+      }
+      // Server returns the persisted row; if it was encrypted, the body
+      // column is empty — overlay the plaintext we sent so the optimistic
+      // UI stays correct.
+      if (real.body.isEmpty && trimmed.isNotEmpty) {
+        real = real.copyWith(displayBody: trimmed);
+      }
       _swapPendingWithReal(convId, tempId, real);
       final store = LocalStore.instanceOrNull;
       if (store != null) {
@@ -237,6 +268,110 @@ class ChatsController extends StateNotifier<ChatsState> {
       }
     } catch (_) {
       _markFailed(convId, tempId);
+    }
+  }
+
+  // Try to seal `plaintext` under the conversation key. Returns null when no
+  // key is available — caller should then send plaintext.
+  Future<EncryptedBlob?> _encryptForConv(String convId, String plaintext, DateTime ts) async {
+    final me = _ref.read(authControllerProvider).user;
+    final conv = state.byId[convId];
+    if (me == null || conv == null) return null;
+    final cache = _ref.read(convKeyCacheProvider);
+    final SecretKey? key;
+    try {
+      key = await cache.keyForConv(
+        convId: convId,
+        convType: conv.type,
+        peerId: conv.peer?.id,
+      );
+    } catch (_) {
+      return null;
+    }
+    if (key == null) return null;
+    try {
+      return await CryptoLib.encryptText(
+        key,
+        plaintext,
+        senderId: me.id,
+        conversationId: convId,
+        createdAtMs: ts.millisecondsSinceEpoch,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Locate a message by id in a conversation, decrypt it, and patch
+  // state. No-op when the message has already been replaced or the conv
+  // was closed.
+  Future<void> _decryptAndPatch(String convId, String msgId) async {
+    final list = state.messages[convId];
+    if (list == null) return;
+    final idx = list.indexWhere((m) => m.id == msgId);
+    if (idx < 0) return;
+    final m = list[idx];
+    if (m.displayBody.isNotEmpty || m.encrypted == null) return;
+    final patched = await _decryptInbound(m);
+    if (identical(patched, m)) return;
+    // Re-read the list in case it changed during the await.
+    final current = state.messages[convId];
+    if (current == null) return;
+    final j = current.indexWhere((x) => x.id == msgId);
+    if (j < 0) return;
+    final next = [...current];
+    next[j] = patched;
+    state = state.copyWith(messages: {...state.messages, convId: next});
+  }
+
+  // Bulk-decrypt every sealed message in a freshly-loaded page. Runs
+  // sequentially per-conversation to avoid hammering the key store; the
+  // expense per-message is tiny (single AES-GCM open).
+  Future<void> _decryptPage(String convId) async {
+    final list = state.messages[convId];
+    if (list == null) return;
+    var changed = false;
+    final next = <Message>[];
+    for (final m in list) {
+      if (m.encrypted == null || m.displayBody.isNotEmpty) {
+        next.add(m);
+        continue;
+      }
+      final p = await _decryptInbound(m);
+      if (!identical(p, m)) changed = true;
+      next.add(p);
+    }
+    if (!changed) return;
+    state = state.copyWith(messages: {...state.messages, convId: next});
+  }
+
+  // Decrypt an inbound encrypted message, populating displayBody. Best-effort;
+  // a failure leaves the message visible as "[encrypted]" so the UI degrades
+  // predictably rather than vanishing the row.
+  Future<Message> _decryptInbound(Message m) async {
+    final enc = m.encrypted;
+    if (enc == null || enc.ciphertext.isEmpty || enc.nonce.isEmpty) return m;
+    final conv = state.byId[m.conversationId];
+    if (conv == null) return m;
+    final cache = _ref.read(convKeyCacheProvider);
+    try {
+      final key = await cache.keyForConv(
+        convId: m.conversationId,
+        convType: conv.type,
+        peerId: conv.peer?.id,
+      );
+      if (key == null) return m.copyWith(displayBody: '[encrypted]');
+      final plaintext = await CryptoLib.decryptText(
+        key,
+        Uint8List.fromList(enc.ciphertext),
+        Uint8List.fromList(enc.nonce),
+        senderId: m.senderId,
+        conversationId: m.conversationId,
+        createdAtMs: m.createdAt.millisecondsSinceEpoch,
+      );
+      return m.copyWith(displayBody: plaintext);
+    } catch (_) {
+      return m.copyWith(displayBody: '[encrypted]');
     }
   }
 
@@ -301,8 +436,14 @@ class ChatsController extends StateNotifier<ChatsState> {
       'createdAt': wire['createdAt'] ?? wire['created_at'],
       if (wire['kind'] != null) 'kind': wire['kind'],
       if (wire['voice'] != null) 'voice': wire['voice'],
+      if (wire['encrypted'] != null) 'encrypted': wire['encrypted'],
     };
     final msg = Message.fromJson(normalized);
+    // Decrypt asynchronously and merge once the plaintext is recovered.
+    // ignore: discarded_futures
+    if (msg.encrypted != null) {
+      _decryptAndPatch(convId, msg.id);
+    }
     final existing = state.messages[convId] ?? const <Message>[];
     if (existing.any((m) => m.id == msg.id)) return;
 

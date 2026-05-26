@@ -10,6 +10,8 @@ import '../api/dto.dart';
 import '../api/realtime.dart';
 import '../api/services.dart';
 import '../api/session_store.dart';
+import '../crypto/conv_keys.dart';
+import '../crypto/key_store.dart';
 import '../features/calls/api/calls_api.dart';
 import '../features/calls/state/call_state.dart';
 import '../features/calls/state/calls_realtime.dart';
@@ -40,6 +42,20 @@ final authApiProvider = Provider<AuthApi>((ref) => AuthApi(ref.read(connectClien
 final usersApiProvider = Provider<UsersApi>((ref) => UsersApi(ref.read(connectClientProvider)));
 final messagingApiProvider =
     Provider<MessagingApi>((ref) => MessagingApi(ref.read(connectClientProvider)));
+
+// E2E identity + conversation key plumbing. Created once per app lifetime
+// (the key store reads from flutter_secure_storage, the conv cache holds the
+// per-session derived keys).
+final identityKeyStoreProvider = Provider<IdentityKeyStore>((_) => IdentityKeyStore());
+
+final convKeyCacheProvider = Provider<ConvKeyCache>((ref) {
+  return ConvKeyCache(
+    identityStore: ref.read(identityKeyStoreProvider),
+    usersApi: ref.read(usersApiProvider),
+    messagingApi: ref.read(messagingApiProvider),
+    currentUserId: '',
+  );
+});
 
 // Boot states drive the redirect logic in the router.
 enum BootState { booting, signedOut, signedIn }
@@ -79,6 +95,10 @@ class AuthController extends StateNotifier<AuthState> {
       _ref.read(realtimeProvider).connect(token);
       // Ensure the calls WS bridge is alive — first read instantiates it.
       _ref.read(callsWsBridgeProvider);
+      // Bring up E2E: generate identity keypair on first run, upload pub.
+      // Best-effort — falls back to plaintext on any failure.
+      // ignore: unawaited_futures, discarded_futures
+      _ensureIdentityKey(me.id);
       // Eagerly hydrate the conversations list so the first paint isn't empty.
       // ignore: unawaited_futures, discarded_futures
       _ref.read(chatsControllerProvider.notifier).loadConversations();
@@ -137,7 +157,25 @@ class AuthController extends StateNotifier<AuthState> {
     _ref.read(realtimeProvider).connect(token);
     _ref.read(callsWsBridgeProvider);
     // ignore: unawaited_futures, discarded_futures
+    _ensureIdentityKey(user.id);
+    // ignore: unawaited_futures, discarded_futures
     _ref.read(chatsControllerProvider.notifier).loadConversations();
+  }
+
+  // Generates and uploads the user's X25519 identity public key on first
+  // run. Idempotent — subsequent boots load the existing key from secure
+  // storage and skip the upload. Errors are swallowed so a network blip
+  // doesn't block sign-in.
+  Future<void> _ensureIdentityKey(String userId) async {
+    try {
+      final store = _ref.read(identityKeyStoreProvider);
+      final pair = await store.loadOrCreate();
+      // Refresh the conv key cache's user id so any subsequent group key
+      // derivations target the right slot.
+      _ref.read(convKeyCacheProvider).reset(userId);
+      // Upload — server upserts, so repeated calls just refresh the timestamp.
+      await _ref.read(usersApiProvider).uploadIdentityKey(pair.publicKey);
+    } catch (_) {/* best-effort */}
   }
 
   // Used by Settings on successful profile save — mirror the fresh User into
@@ -159,6 +197,10 @@ class AuthController extends StateNotifier<AuthState> {
     try {
       await LocalStore.wipe();
     } catch (_) {/* ignore */}
+    // Drop derived conv keys; keep the identity keypair on disk so the
+    // user's NEXT session on this device re-uses the same public key
+    // (anyone who already cached it stays addressable).
+    _ref.read(convKeyCacheProvider).reset(null);
     state = AuthState(boot: BootState.signedOut);
   }
 }

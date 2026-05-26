@@ -3,8 +3,20 @@
 // Each method names exactly the RPC on the backend and parses the response into
 // a DTO from dto.dart. New endpoints get a one-line addition here.
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'connect.dart';
 import 'dto.dart';
+
+// GroupKeyBundleDto carries the wrapped group key the ConvKeyCache decrypts
+// to recover the per-conversation symmetric key.
+class GroupKeyBundleDto {
+  GroupKeyBundleDto({required this.perMember, required this.nonce});
+  // user_id -> wrapped ciphertext (32-byte key + 16-byte tag).
+  final Map<String, Uint8List> perMember;
+  final Uint8List nonce;
+}
 
 class AuthApi {
   AuthApi(this._c);
@@ -126,6 +138,49 @@ class UsersApi {
         .map((m) => Presence.fromJson(m.cast<String, dynamic>()))
         .toList();
   }
+
+  // --- E2E identity keys ---
+
+  Future<void> uploadIdentityKey(Uint8List publicKey) async {
+    await _c.call('quick.v1.Users', 'UploadIdentityKey', {
+      'publicKey': base64Encode(publicKey),
+    });
+  }
+
+  // Returns the 32-byte public key, or null when the user hasn't uploaded one.
+  Future<Uint8List?> getIdentityKey(String userId) async {
+    try {
+      final res = await _c.call('quick.v1.Users', 'GetIdentityKey', {
+        'userId': userId,
+      });
+      final raw = (res['identityKey'] as Map?)?['publicKey'];
+      if (raw is! String || raw.isEmpty) return null;
+      return Uint8List.fromList(base64Decode(raw));
+    } catch (_) {
+      // NOT_FOUND surfaces as ConnectError — treat as "no key yet".
+      return null;
+    }
+  }
+
+  // Batch fetch — missing users are silently dropped on the server. Returns
+  // a userId -> publicKey map.
+  Future<Map<String, Uint8List>> getIdentityKeys(List<String> userIds) async {
+    if (userIds.isEmpty) return const {};
+    final res = await _c.call('quick.v1.Users', 'GetIdentityKeys', {
+      'userIds': userIds,
+    });
+    final out = <String, Uint8List>{};
+    final list = (res['identityKeys'] as List?) ?? const [];
+    for (final entry in list) {
+      if (entry is! Map) continue;
+      final j = entry.cast<String, dynamic>();
+      final uid = j['userId'] as String?;
+      final pk = j['publicKey'] as String?;
+      if (uid == null || pk == null || pk.isEmpty) continue;
+      out[uid] = Uint8List.fromList(base64Decode(pk));
+    }
+    return out;
+  }
 }
 
 class MessagingApi {
@@ -171,11 +226,29 @@ class MessagingApi {
     return (messages: msgs, hasMore: (res['hasMore'] as bool?) ?? false);
   }
 
-  Future<Message> sendMessage(String conversationId, String body) async {
-    final res = await _c.call('quick.v1.Messaging', 'SendMessage', {
+  // sendMessage. When `encryptedCiphertext` is non-null the body field is
+  // ignored — server stores only the sealed payload.
+  Future<Message> sendMessage(
+    String conversationId,
+    String body, {
+    Uint8List? encryptedCiphertext,
+    Uint8List? encryptedNonce,
+    String? encryptedSenderKeyId,
+  }) async {
+    final payload = <String, dynamic>{
       'conversationId': conversationId,
       'body': body,
-    });
+    };
+    if (encryptedCiphertext != null && encryptedNonce != null) {
+      payload['body'] = '';
+      payload['encrypted'] = {
+        'ciphertext': base64Encode(encryptedCiphertext),
+        'nonce': base64Encode(encryptedNonce),
+        if (encryptedSenderKeyId != null && encryptedSenderKeyId.isNotEmpty)
+          'senderKeyId': encryptedSenderKeyId,
+      };
+    }
+    final res = await _c.call('quick.v1.Messaging', 'SendMessage', payload);
     return Message.fromJson(
       (res['message'] as Map?)?.cast<String, dynamic>() ?? const {},
     );
@@ -186,5 +259,47 @@ class MessagingApi {
       'conversationId': conversationId,
       'lastMessageId': lastMessageId,
     });
+  }
+
+  // --- E2E group key bundles ---
+
+  Future<void> putGroupKeyBundle(
+    String conversationId,
+    Map<String, Uint8List> perMember,
+    Uint8List nonce,
+  ) async {
+    final wrapped = <String, String>{
+      for (final e in perMember.entries) e.key: base64Encode(e.value),
+    };
+    await _c.call('quick.v1.Messaging', 'PutGroupKeyBundle', {
+      'conversationId': conversationId,
+      'ciphertextPerMember': wrapped,
+      'nonce': base64Encode(nonce),
+    });
+  }
+
+  Future<GroupKeyBundleDto?> getGroupKeyBundle(String conversationId) async {
+    try {
+      final res = await _c.call('quick.v1.Messaging', 'GetGroupKeyBundle', {
+        'conversationId': conversationId,
+      });
+      final raw = (res['bundle'] as Map?)?.cast<String, dynamic>();
+      if (raw == null) return null;
+      final perMemberRaw = (raw['ciphertextPerMember'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final perMember = <String, Uint8List>{};
+      perMemberRaw.forEach((k, v) {
+        if (v is String && v.isNotEmpty) {
+          perMember[k] = Uint8List.fromList(base64Decode(v));
+        }
+      });
+      final nonceRaw = raw['nonce'] as String?;
+      if (nonceRaw == null || nonceRaw.isEmpty) return null;
+      return GroupKeyBundleDto(
+        perMember: perMember,
+        nonce: Uint8List.fromList(base64Decode(nonceRaw)),
+      );
+    } catch (_) {
+      return null;
+    }
   }
 }

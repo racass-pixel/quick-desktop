@@ -5,6 +5,8 @@
 // is wired up later, these can be replaced by generated code without UI churn:
 // every UI component reads the camelCase getters defined below.
 
+import 'dart:convert';
+
 class User {
   User({
     required this.id,
@@ -56,11 +58,15 @@ class Message {
     this.tempId,
     this.kind = 'text',
     this.voice,
+    this.encrypted,
+    this.displayBody = '',
   });
 
   final String id;
   final String conversationId;
   final String senderId;
+  // body is the legacy plaintext column. May be empty when the message is
+  // E2E-encrypted; the decrypted view lives in `displayBody`.
   final String body;
   final DateTime createdAt;
   final MessageStatus status;
@@ -70,6 +76,19 @@ class Message {
   final String kind;
   // Populated when kind == 'voice'.
   final VoicePayload? voice;
+  // Populated when the body was sealed E2E. The decrypted text gets stuffed
+  // into `displayBody` by the chats controller once the conv key is known.
+  final EncryptedPayloadDto? encrypted;
+  // Local-only: the rendered text the UI should show. For plaintext rows it
+  // mirrors `body`; for sealed rows it holds the decrypted result.
+  final String displayBody;
+
+  // Convenience: best body for rendering. Falls back through displayBody ->
+  // body so legacy plaintext keeps working unchanged.
+  String get renderedBody {
+    if (displayBody.isNotEmpty) return displayBody;
+    return body;
+  }
 
   Message copyWith({
     String? id,
@@ -77,6 +96,7 @@ class Message {
     DateTime? createdAt,
     String? kind,
     VoicePayload? voice,
+    String? displayBody,
   }) =>
       Message(
         id: id ?? this.id,
@@ -88,12 +108,18 @@ class Message {
         tempId: tempId,
         kind: kind ?? this.kind,
         voice: voice ?? this.voice,
+        encrypted: encrypted,
+        displayBody: displayBody ?? this.displayBody,
       );
 
   factory Message.fromJson(Map<String, dynamic> j) {
     final voiceRaw = j['voice'];
     final voice = voiceRaw is Map
         ? VoicePayload.fromJson(voiceRaw.cast<String, dynamic>())
+        : null;
+    final encRaw = j['encrypted'];
+    final encrypted = encRaw is Map
+        ? EncryptedPayloadDto.fromJson(encRaw.cast<String, dynamic>())
         : null;
     var kind = (j['kind'] as String?) ?? '';
     if (kind.isEmpty) {
@@ -107,9 +133,49 @@ class Message {
       createdAt: _parseTs(j['createdAt']) ?? DateTime.now(),
       kind: kind,
       voice: voice,
+      encrypted: encrypted,
     );
   }
 }
+
+// EncryptedPayloadDto mirrors the proto EncryptedPayload. ciphertext and
+// nonce arrive as base64-encoded strings on the wire.
+class EncryptedPayloadDto {
+  const EncryptedPayloadDto({
+    required this.ciphertext,
+    required this.nonce,
+    this.senderKeyId = '',
+  });
+
+  final List<int> ciphertext;
+  final List<int> nonce;
+  final String senderKeyId;
+
+  factory EncryptedPayloadDto.fromJson(Map<String, dynamic> j) {
+    List<int> _decode(dynamic raw) {
+      if (raw == null) return const [];
+      if (raw is List) {
+        return raw.whereType<num>().map((e) => e.toInt()).toList();
+      }
+      if (raw is String) {
+        if (raw.isEmpty) return const [];
+        try {
+          return _b64.decode(raw);
+        } catch (_) {
+          return const [];
+        }
+      }
+      return const [];
+    }
+    return EncryptedPayloadDto(
+      ciphertext: _decode(j['ciphertext']),
+      nonce: _decode(j['nonce']),
+      senderKeyId: (j['senderKeyId'] as String?) ?? (j['sender_key_id'] as String?) ?? '',
+    );
+  }
+}
+
+const _b64 = Base64Decoder();
 
 enum MessageStatus { pending, sent, read, failed }
 
