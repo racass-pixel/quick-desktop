@@ -182,6 +182,13 @@ class MediaUploader {
   }
 }
 
+// Convenience: builds a token-authenticated GET URL for a file_id. The
+// backend serves uploaded media at /v1/media/{file_id}.
+String buildMediaUrl(String baseUrl, String fileId, String token) {
+  final t = Uri.encodeQueryComponent(token);
+  return '$baseUrl/v1/media/$fileId?token=$t';
+}
+
 // http.MultipartFile companion not used by MediaUploader above (we stream
 // manually), but kept for callers that just want a quick non-progress upload
 // path via the standard package:http transport.

@@ -13,6 +13,12 @@ import '../api/dto.dart';
 import '../features/calls/screens/group_call_banner.dart';
 import '../features/calls/state/call_state.dart';
 import '../features/groups/widgets/group_info_modal.dart';
+import '../api/media_upload.dart';
+import '../features/messaging/attachments/attach_button.dart';
+import '../features/messaging/attachments/file_bubble.dart';
+import '../features/messaging/attachments/image_bubble.dart';
+import '../features/messaging/attachments/upload_progress.dart';
+import '../features/messaging/attachments/upload_state.dart';
 import '../features/messaging/forward/forward_modal.dart';
 import '../features/messaging/reactions/reaction_picker.dart';
 import '../features/messaging/reactions/reaction_strip.dart';
@@ -45,6 +51,9 @@ class _ChatViewState extends ConsumerState<ChatView> {
   bool _hasText = false;
   // Inline 3-second error pill in the composer for voice flow failures.
   String? _voiceError;
+  // Per-chat-view upload queue. Files are appended as the user picks them
+  // and drained into `attachmentFileIds` when the next message is sent.
+  final UploadQueue _uploads = UploadQueue();
 
   @override
   void initState() {
@@ -125,18 +134,20 @@ class _ChatViewState extends ConsumerState<ChatView> {
 
   Future<void> _send() async {
     final text = _composer.text;
-    if (text.trim().isEmpty) return;
+    final fileIds = _uploads.drainReady();
+    if (text.trim().isEmpty && fileIds.isEmpty) return;
     _composer.clear();
     _composerFocus.requestFocus();
     final replyTo = ref
         .read(chatsControllerProvider)
         .replyTargets[widget.conversationId];
     final ctrl = ref.read(chatsControllerProvider.notifier);
-    if (replyTo != null && replyTo.isNotEmpty) {
+    if (fileIds.isNotEmpty || (replyTo != null && replyTo.isNotEmpty)) {
       await ctrl.sendRich(
         convId: widget.conversationId,
         body: text,
         replyToMessageId: replyTo,
+        attachmentFileIds: fileIds,
       );
     } else {
       await ctrl.send(widget.conversationId, text);
@@ -353,6 +364,7 @@ class _ChatViewState extends ConsumerState<ChatView> {
                   },
                 ),
         ),
+        UploadProgressStrip(queue: _uploads),
         if (replyTargetMsg != null)
           ReplyComposePill(
             message: replyTargetMsg,
@@ -362,6 +374,7 @@ class _ChatViewState extends ConsumerState<ChatView> {
                 .setReplyTarget(widget.conversationId, null),
           ),
         _Composer(
+          uploadQueue: _uploads,
           controller: _composer,
           focusNode: _composerFocus,
           onSend: _send,
@@ -743,6 +756,25 @@ class _BubbleState extends ConsumerState<_Bubble>
                       : 'Reply'),
               onTap: widget.onTapReply ?? () {},
             ),
+          for (final a in message.attachments)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: a.kind == 'image'
+                  ? ImageBubble(
+                      attachment: a,
+                      url: buildMediaUrl(
+                          apiBaseUrl,
+                          a.fileId,
+                          ref.read(connectClientProvider).token ?? ''),
+                    )
+                  : FileBubble(
+                      attachment: a,
+                      url: buildMediaUrl(
+                          apiBaseUrl,
+                          a.fileId,
+                          ref.read(connectClientProvider).token ?? ''),
+                    ),
+            ),
           if (message.renderedBody.isNotEmpty)
             Text(
               message.renderedBody,
@@ -977,6 +1009,7 @@ class _Composer extends ConsumerWidget {
     required this.onLocalVoice,
     required this.onVoiceSent,
     required this.onVoiceError,
+    required this.uploadQueue,
   });
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -987,6 +1020,7 @@ class _Composer extends ConsumerWidget {
   final void Function(vw.VoicePayload payload) onLocalVoice;
   final void Function(VoiceSendResult result) onVoiceSent;
   final void Function(String msg) onVoiceError;
+  final UploadQueue uploadQueue;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1021,6 +1055,8 @@ class _Composer extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              AttachButton(queue: uploadQueue),
+              const SizedBox(width: 4),
               Expanded(
                 child: Shortcuts(
                   shortcuts: const {

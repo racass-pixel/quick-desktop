@@ -616,3 +616,37 @@ Per-thread:
 
 On logout the secure-storage token is cleared AND `LocalStore.wipe()` deletes
 the DB so the next sign-in starts fresh.
+
+## Attachments + replies + reactions + forward + search (v0.1.7)
+
+Wire shape between client and backend (proto v0.14.0):
+
+- Outgoing rich send: `Messaging.SendMessage` accepts `body`, optional
+  `replyToMessageId`, and `attachmentFileIds[]` collected from the inline
+  upload queue (`lib/features/messaging/attachments/upload_state.dart`).
+- Uploads: `POST /v1/media/upload` (multipart, single `file` field) via
+  `MediaUploader.uploadPath`. Returns `{ file_id, kind, mime, size, ... }`.
+- Reactions: `Messaging.AddReaction { messageId, emoji }` /
+  `RemoveReaction` / `ListReactions`. WS envelopes `reaction_added` and
+  `reaction_removed` carry `message_id`, `user_id`, `emoji` and are merged
+  into `Message.reactions` by `ChatsController._applyReaction`.
+- Forward: `Messaging.ForwardMessage { sourceMessageId, targetConversationId }`.
+  The returned `Message.forwardOriginText` is rendered above the bubble body.
+- Search: `Messaging.SearchMessages { query, conversationId?, limit, beforeId? }`
+  drives both the global sidebar search section and the in-pane magnifier.
+
+E2E posture for attachments: **deferred**. The current `sendRich` path sends
+the body in plaintext when attachments are present (TODO marker in
+`chats_controller.dart`). The encrypted path in `send()` stays the
+authoritative route for text-only DMs. A follow-up will:
+
+1. Seal attachment file_ids alongside the body under the conversation key.
+2. Encrypt the uploaded media bytes client-side before the multipart POST
+   (the backend already stores ciphertext at rest for voice; the same shape
+   applies here).
+3. Migrate `forwardMessage` so forwards re-seal under the target
+   conversation's key.
+
+Until those land, image / file bubbles fetch via the existing
+`GET /v1/media/{file_id}?token=...` (token-authenticated, server-side
+encrypted at rest).
