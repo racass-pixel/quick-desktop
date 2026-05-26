@@ -1,3 +1,12 @@
+// Single-email entry screen for the passkey flow. The same form serves both
+// signup and login — we always try SignupWithPasskey first and let the server
+// tell us via 'already_exists' that this email already has an account, in
+// which case we route to the passkey login screen prefilled with the email.
+//
+// A small toggle below the form lets the user pre-declare which path they
+// expect (Sign up / Log in), purely a UX hint — the underlying detection is
+// always driven by the server response, so the toggle never gates anything.
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -5,6 +14,8 @@ import 'package:go_router/go_router.dart';
 import '../api/connect.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
+
+enum _Mode { signup, login }
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -16,6 +27,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _email = TextEditingController();
   bool _busy = false;
   String? _error;
+  _Mode _mode = _Mode.signup;
 
   @override
   void dispose() {
@@ -34,13 +46,40 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _error = null;
     });
     try {
-      await ref.read(authApiProvider).requestCode(email);
+      if (_mode == _Mode.login) {
+        // User pre-declared they have an account; skip the signup probe and
+        // go straight to the passkey field.
+        if (!mounted) return;
+        context.push('/login-passkey?email=${Uri.encodeQueryComponent(email)}');
+        return;
+      }
+      final res = await ref.read(authApiProvider).signupWithPasskey(email);
+      if (res.token.isEmpty || res.passkey.isEmpty) {
+        setState(() => _error = 'Server returned an incomplete response.');
+        return;
+      }
+      // Persist the session immediately so a refresh would not strand the
+      // user — the passkey is still shown next, but the account is real.
+      await ref
+          .read(authControllerProvider.notifier)
+          .onVerified(res.token, res.user);
       if (!mounted) return;
-      context.go('/verify?email=${Uri.encodeQueryComponent(email)}');
+      context.push(
+        '/passkey-reveal'
+        '?email=${Uri.encodeQueryComponent(email)}'
+        '&passkey=${Uri.encodeQueryComponent(res.passkey)}',
+      );
     } on ConnectError catch (e) {
-      setState(() =>
-          _error = e.code == 'resource_exhausted' ? 'Too many attempts. Try again shortly.' : e.message);
-    } catch (e) {
+      if (e.code == 'already_exists') {
+        if (!mounted) return;
+        context.push(
+            '/login-passkey?email=${Uri.encodeQueryComponent(email)}');
+        return;
+      }
+      setState(() => _error = e.code == 'resource_exhausted'
+          ? 'Too many attempts. Try again shortly.'
+          : (e.message.isNotEmpty ? e.message : 'Sign-in failed.'));
+    } catch (_) {
       setState(() => _error = 'Network error.');
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -49,6 +88,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isLogin = _mode == _Mode.login;
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -82,7 +122,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Private messenger',
+                  isLogin ? 'Welcome back' : 'Create your account',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
@@ -96,13 +136,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   onSubmitted: (_) => _busy ? null : _submit(),
                   decoration: const InputDecoration(
                     hintText: 'you@example.com',
-                    prefixIcon: Icon(Icons.mail_outline, color: AppColors.ink3),
+                    prefixIcon:
+                        Icon(Icons.mail_outline, color: AppColors.ink3),
                   ),
                 ),
                 if (_error != null) ...[
                   const SizedBox(height: 10),
                   Text(_error!,
-                      style: const TextStyle(color: AppColors.err, fontSize: 12)),
+                      style: const TextStyle(
+                          color: AppColors.err, fontSize: 12)),
                 ],
                 const SizedBox(height: 16),
                 ElevatedButton(
@@ -114,13 +156,33 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           child: CircularProgressIndicator(
                               strokeWidth: 2, color: Colors.white),
                         )
-                      : const Text('Send code'),
+                      : const Text('Continue'),
                 ),
                 const SizedBox(height: 14),
-                Text(
-                  'We will email a 6-digit code to verify it is you.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodySmall,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      isLogin ? 'New here?' : 'Have a passkey?',
+                      style: const TextStyle(
+                          color: AppColors.ink3, fontSize: 12),
+                    ),
+                    const SizedBox(width: 6),
+                    TextButton(
+                      onPressed: _busy
+                          ? null
+                          : () => setState(() => _mode =
+                              isLogin ? _Mode.signup : _Mode.login),
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(0, 0),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        textStyle: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600),
+                      ),
+                      child: Text(isLogin ? 'Sign up' : 'Log in'),
+                    ),
+                  ],
                 ),
               ],
             ),
