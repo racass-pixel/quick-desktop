@@ -345,3 +345,173 @@ and notify listeners. The bubble re-renders on its own once the underlying
   `<temp>/quick_voice/rec_<microsTimestamp>.m4a`. The recorder deletes the
   file after a successful upload, but the OS reaps the dir on its own
   schedule if a crash leaves orphans.
+
+# Calls
+
+Voice / video / screen-share for 1:1 and group conversations. Lives entirely
+inside `lib/features/calls/` and depends on:
+
+- `lib/api/connect.dart` — `ConnectClient` for the 9 `quick.v1.Calls` RPCs
+- `lib/api/realtime.dart` — `Stream<WsEnvelope>` for the 8 call envelopes
+- `lib/theme/theme.dart` — colors and radii
+
+LiveKit URL is read from `CallJoin.livekitUrl` returned by the backend; falls
+back to `wss://livekit.quick-network.vu` if the field is empty.
+
+## 1. Construct + share at boot
+
+After the foundation's `ConnectClient` + `RealtimeClient` are ready, wire two
+notifiers and the WS bridge:
+
+```dart
+import 'features/calls/api/calls_api.dart';
+import 'features/calls/state/call_state.dart';
+import 'features/calls/state/group_call_state.dart';
+import 'features/calls/state/calls_realtime.dart';
+
+final callsApi = CallsApi(connect);
+final callNotifier = CallNotifier(callsApi);
+final groupCallNotifier = GroupCallNotifier(callsApi);
+final callsWsSub = wireCallsRealtime(
+  realtime.envelopes,
+  callNotifier,
+  groupCallNotifier,
+);
+// On sign-out: callsWsSub.cancel(); callNotifier.dispose(); groupCallNotifier.dispose();
+```
+
+Riverpod variants (recommended — matches `lib/state/providers.dart`):
+
+```dart
+final callsApiProvider = Provider<CallsApi>((ref) =>
+    CallsApi(ref.read(connectClientProvider)));
+
+final callNotifierProvider = ChangeNotifierProvider<CallNotifier>((ref) {
+  final n = CallNotifier(ref.read(callsApiProvider));
+  ref.onDispose(n.dispose);
+  return n;
+});
+
+final groupCallNotifierProvider =
+    ChangeNotifierProvider<GroupCallNotifier>((ref) {
+  final n = GroupCallNotifier(ref.read(callsApiProvider));
+  ref.onDispose(n.dispose);
+  return n;
+});
+
+final callsWsBridgeProvider = Provider<StreamSubscription<Map<String, dynamic>>>((ref) {
+  final sub = wireCallsRealtime(
+    ref.read(realtimeProvider).envelopes,
+    ref.read(callNotifierProvider),
+    ref.read(groupCallNotifierProvider),
+  );
+  ref.onDispose(sub.cancel);
+  return sub;
+});
+```
+
+## 2. Mount `CallScreen` over the main shell
+
+When either notifier is in an active lifecycle and NOT minimized, the full
+`CallScreen` should occupy the window. Wrap your `MaterialApp.router` builder:
+
+```dart
+import 'features/calls/screens/call_screen.dart';
+import 'features/calls/widgets/call_pip.dart';
+import 'features/calls/widgets/incoming_call_dialog.dart';
+
+MaterialApp.router(
+  builder: (context, child) {
+    return Stack(
+      children: [
+        child ?? const SizedBox.shrink(),
+        // Full-screen takeover when active + not minimized.
+        AnimatedBuilder(
+          animation: Listenable.merge([callNotifier, groupCallNotifier]),
+          builder: (_, _) {
+            final inCall = callNotifier.lifecycle == CallLifecycle.active ||
+                callNotifier.lifecycle == CallLifecycle.ringingOut;
+            final inGroup =
+                groupCallNotifier.lifecycle == GroupCallLifecycle.active;
+            final minimized = (inCall && callNotifier.isMinimized) ||
+                (inGroup && groupCallNotifier.isMinimized);
+            if ((inCall || inGroup) && !minimized) {
+              return CallScreen(
+                call: callNotifier,
+                group: groupCallNotifier,
+              );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+        // Floating pip — visible whenever an active call is minimized.
+        CallPip(call: callNotifier, group: groupCallNotifier),
+        // Incoming dialog — auto-dismisses on accept/decline/timeout.
+        IncomingCallOverlay(call: callNotifier),
+      ],
+    );
+  },
+);
+```
+
+## 3. Start a 1:1 call
+
+From a profile modal or chat header:
+
+```dart
+callNotifier.startCall(
+  CallPeer(
+    id: user.id,
+    displayName: user.displayName,
+    handle: user.handle,
+    avatarColor: user.avatarColor,
+  ),
+  video: false, // or true for a video call
+);
+```
+
+The notifier handles the entire lifecycle: ringing-out → active → end.
+
+## 4. Mount the group-call banner in conversation views
+
+At the top of every group/channel conversation:
+
+```dart
+import 'features/calls/screens/group_call_banner.dart';
+
+GroupCallBanner(
+  conversationId: conversation.id,
+  group: groupCallNotifier,
+)
+```
+
+The banner returns `SizedBox.shrink()` when no group call is active in that
+conversation and we're not in one — zero layout cost. To start a group call
+from the chat header:
+
+```dart
+groupCallNotifier.startGroupCall(conversation.id);
+```
+
+To preload banner state when the chats list loads:
+
+```dart
+groupCallNotifier.refreshActive(conversations.map((c) => c.id).toList());
+```
+
+## 5. Screen-share + anti-echo (Windows gotcha)
+
+The feature calls `setScreenShareEnabled(true, captureScreenAudio: true)`
+which on Windows routes through `flutter-webrtc`'s `getDisplayMedia` and
+honors the system-audio checkbox in the Windows desktop-capture picker.
+
+The web app's `suppressLocalAudioPlayback` anti-echo trick has no direct
+analog in `livekit_client` on Windows. Workarounds:
+
+1. Share a single application window rather than the entire screen.
+2. Route the app's audio output to a virtual cable that the screen-share
+   capture does NOT include.
+
+The `startScreenShare()` methods carry a `TODO(calls-anti-echo)` and a
+desktop-source-picker UI is the right follow-up once a single agent owns the
+calls UX end-to-end.
