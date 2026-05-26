@@ -9,6 +9,7 @@ import '../features/groups/widgets/create_channel_dialog.dart';
 import '../features/groups/widgets/create_group_dialog.dart';
 import '../features/settings/widgets/profile_modal.dart';
 import '../features/settings/widgets/sidebar_drawer.dart';
+import '../services/notifications_bridge.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
 import '../widgets/toast_layer.dart';
@@ -25,6 +26,25 @@ class MainShell extends ConsumerStatefulWidget {
 
 class _MainShellState extends ConsumerState<MainShell> {
   bool _drawerOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Hand the notifications bridge a router-aware navigation callback. The
+    // bridge invokes it when the user clicks a toast.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      NotificationsBridge.onOpenChat = (convId) {
+        if (!mounted) return;
+        context.go('/chats/$convId');
+      };
+    });
+  }
+
+  @override
+  void dispose() {
+    NotificationsBridge.onOpenChat = null;
+    super.dispose();
+  }
 
   void _openDrawer() => setState(() => _drawerOpen = true);
   void _closeDrawer() => setState(() => _drawerOpen = false);

@@ -10,6 +10,7 @@ import 'features/calls/state/group_call_state.dart';
 import 'features/calls/widgets/call_pip.dart';
 import 'features/calls/widgets/incoming_call_dialog.dart';
 import 'router.dart';
+import 'services/notifications_bridge.dart';
 import 'services/tray.dart';
 import 'state/providers.dart';
 import 'state/window_focus.dart';
@@ -55,6 +56,8 @@ class _QuickAppState extends ConsumerState<QuickApp> with WindowListener {
       ref.read(authControllerProvider.notifier).bootstrap();
       // Touch the updater provider so the polling loop spins up.
       ref.read(updaterServiceProvider);
+      // Spin up the WS → toasts bridge — first read instantiates it.
+      ref.read(notificationsBridgeProvider);
       // Tray with bound callbacks. Open = show + focus, Quit = real exit.
       await TrayService.instance.init(
         onOpen: _restoreWindow,
