@@ -486,17 +486,20 @@ class _ProfileModalState extends State<ProfileModal> {
 
                     if (!isSelf) ...[
                       const Divider(height: 1, color: AppColors.line),
-                      InkWell(
-                        onTap: _busy == null ? _doBlock : null,
-                        child: SizedBox(
-                          height: 48,
-                          child: Center(
-                            child: Text(
-                              _busy == 'block' ? 'Blocking…' : 'Block user',
-                              style: const TextStyle(
-                                color: AppColors.err,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                      Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: _busy == null ? _doBlock : null,
+                          child: SizedBox(
+                            height: 48,
+                            child: Center(
+                              child: Text(
+                                _busy == 'block' ? 'Blocking…' : 'Block user',
+                                style: const TextStyle(
+                                  color: AppColors.err,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ),
                           ),

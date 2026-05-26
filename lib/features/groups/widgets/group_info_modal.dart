@@ -525,28 +525,31 @@ class _GroupInfoModalState extends State<GroupInfoModal> {
         ),
       );
     }
-    return InkWell(
-      onTap: () => setState(() => _confirmLeave = true),
-      child: Container(
-        height: 48,
-        alignment: Alignment.center,
-        decoration: const BoxDecoration(
-          border: Border(top: BorderSide(color: AppColors.line)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.logout, color: AppColors.err, size: 16),
-            const SizedBox(width: 8),
-            Text(
-              'Leave $_convLabel',
-              style: const TextStyle(
-                color: AppColors.err,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => setState(() => _confirmLeave = true),
+        child: Container(
+          height: 48,
+          alignment: Alignment.center,
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: AppColors.line)),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.logout, color: AppColors.err, size: 16),
+              const SizedBox(width: 8),
+              Text(
+                'Leave $_convLabel',
+                style: const TextStyle(
+                  color: AppColors.err,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

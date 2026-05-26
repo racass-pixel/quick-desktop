@@ -581,22 +581,31 @@ class _CtrlButton extends StatelessWidget {
       fg = AppColors.err;
       border = AppColors.line;
     }
+    // Material wraps the InkWell with a circle shape so hover/focus highlights
+    // are clipped to the button. Without this, the InkWell hover paints onto
+    // the nearest Material ancestor (the Scaffold), producing a grey rectangle
+    // that fills the call stage.
     return Tooltip(
       message: label,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(28),
-        onTap: onTap,
-        child: Container(
-          width: 56,
-          height: 56,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: bg,
-            shape: BoxShape.circle,
-            border: Border.all(color: border),
-            boxShadow: shadow,
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Container(
+            width: 56,
+            height: 56,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: bg,
+              shape: BoxShape.circle,
+              border: Border.all(color: border),
+              boxShadow: shadow,
+            ),
+            child: Icon(icon, color: fg, size: 24),
           ),
-          child: Icon(icon, color: fg, size: 24),
         ),
       ),
     );
@@ -664,19 +673,24 @@ class _ScreenShareBadge extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 6),
-            InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onTap: onStop,
-              child: Container(
-                width: 28,
-                height: 28,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: AppColors.err.withValues(alpha: 0.15),
-                  shape: BoxShape.circle,
+            Material(
+              color: Colors.transparent,
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: onStop,
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: AppColors.err.withValues(alpha: 0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.stop_rounded,
+                      size: 18, color: AppColors.err),
                 ),
-                child: const Icon(Icons.stop_rounded,
-                    size: 18, color: AppColors.err),
               ),
             ),
           ],

@@ -791,39 +791,45 @@ class _AudioToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(AppRadii.rSm),
-      onTap: () => onChanged(!value),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: Checkbox(
-                value: value,
-                onChanged: (v) => onChanged(v ?? false),
-                activeColor: AppColors.ember,
-                checkColor: Colors.white,
-                side: const BorderSide(
-                    color: AppColors.line, width: 1.5),
-                materialTapTargetSize:
-                    MaterialTapTargetSize.shrinkWrap,
-                visualDensity: VisualDensity.compact,
+    final radius = BorderRadius.circular(AppRadii.rSm);
+    return Material(
+      color: Colors.transparent,
+      borderRadius: radius,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: radius,
+        onTap: () => onChanged(!value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: Checkbox(
+                  value: value,
+                  onChanged: (v) => onChanged(v ?? false),
+                  activeColor: AppColors.ember,
+                  checkColor: Colors.white,
+                  side: const BorderSide(
+                      color: AppColors.line, width: 1.5),
+                  materialTapTargetSize:
+                      MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              'Share audio',
-              style: TextStyle(
-                color: AppColors.ink1,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
+              const SizedBox(width: 8),
+              const Text(
+                'Share audio',
+                style: TextStyle(
+                  color: AppColors.ink1,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

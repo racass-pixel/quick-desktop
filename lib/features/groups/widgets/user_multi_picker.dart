@@ -142,58 +142,61 @@ class _UserMultiPickerState extends State<UserMultiPicker> {
                 itemCount: _results.length,
                 itemBuilder: (ctx, i) {
                   final u = _results[i];
-                  return InkWell(
-                    onTap: () => _add(u),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: avatarColor(u.avatarColor, u.displayName),
-                              shape: BoxShape.circle,
-                            ),
-                            alignment: Alignment.center,
-                            child: Text(
-                              avatarInitials(u.displayName.isNotEmpty ? u.displayName : u.handle),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
+                  return Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () => _add(u),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: avatarColor(u.avatarColor, u.displayName),
+                                shape: BoxShape.circle,
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                avatarInitials(u.displayName.isNotEmpty ? u.displayName : u.handle),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  u.displayName.isNotEmpty ? u.displayName : '@${u.handle}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    color: AppColors.ink1,
-                                  ),
-                                ),
-                                if (u.handle.isNotEmpty)
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
                                   Text(
-                                    '@${u.handle}',
+                                    u.displayName.isNotEmpty ? u.displayName : '@${u.handle}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
-                                      fontSize: 11,
-                                      fontFamily: 'Consolas',
-                                      color: AppColors.ink3,
+                                      fontSize: 13,
+                                      color: AppColors.ink1,
                                     ),
                                   ),
-                              ],
+                                  if (u.handle.isNotEmpty)
+                                    Text(
+                                      '@${u.handle}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontFamily: 'Consolas',
+                                        color: AppColors.ink3,
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   );
@@ -232,9 +235,18 @@ class _Chip extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          InkWell(
-            onTap: onRemove,
-            child: const Icon(Icons.close, size: 12, color: AppColors.ink3),
+          Material(
+            color: Colors.transparent,
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onRemove,
+              child: const Padding(
+                padding: EdgeInsets.all(2),
+                child: Icon(Icons.close, size: 12, color: AppColors.ink3),
+              ),
+            ),
           ),
         ],
       ),

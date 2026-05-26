@@ -204,37 +204,40 @@ class _SearchResults extends StatelessWidget {
       itemCount: results.length,
       itemBuilder: (_, i) {
         final u = results[i];
-        return InkWell(
-          onTap: () => onTap(u),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Row(
-              children: [
-                Avatar(
-                  name: u.displayName.isNotEmpty ? u.displayName : u.handle,
-                  colorHex: u.avatarColor,
-                  size: 36,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        u.displayName.isNotEmpty ? u.displayName : u.handle,
-                        style: const TextStyle(
-                          color: AppColors.ink1,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                      Text('@${u.handle}',
-                          style: const TextStyle(
-                              color: AppColors.ink3, fontSize: 12)),
-                    ],
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => onTap(u),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                children: [
+                  Avatar(
+                    name: u.displayName.isNotEmpty ? u.displayName : u.handle,
+                    colorHex: u.avatarColor,
+                    size: 36,
                   ),
-                ),
-              ],
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          u.displayName.isNotEmpty ? u.displayName : u.handle,
+                          style: const TextStyle(
+                            color: AppColors.ink1,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text('@${u.handle}',
+                            style: const TextStyle(
+                                color: AppColors.ink3, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );

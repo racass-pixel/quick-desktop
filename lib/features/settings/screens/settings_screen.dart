@@ -511,25 +511,30 @@ class _AccountSection extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          InkWell(
-            onTap: onLogout,
+          Material(
+            color: Colors.transparent,
             borderRadius: BorderRadius.circular(AppRadii.rMd),
-            child: Container(
-              height: 44,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              alignment: Alignment.centerLeft,
-              child: Row(
-                children: const [
-                  Icon(Icons.logout, color: AppColors.err, size: 20),
-                  SizedBox(width: 16),
-                  Text(
-                    'Log out',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: AppColors.err,
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onLogout,
+              borderRadius: BorderRadius.circular(AppRadii.rMd),
+              child: Container(
+                height: 44,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: const [
+                    Icon(Icons.logout, color: AppColors.err, size: 20),
+                    SizedBox(width: 16),
+                    Text(
+                      'Log out',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: AppColors.err,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
