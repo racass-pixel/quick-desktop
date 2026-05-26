@@ -1,7 +1,7 @@
 name: quick_desktop
 description: "Quick — private messenger"
 publish_to: 'none'
-version: 0.1.5+6
+version: 0.1.6+7
 
 environment:
   sdk: ^3.12.0
