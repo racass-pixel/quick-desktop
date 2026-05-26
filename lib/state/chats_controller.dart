@@ -186,6 +186,9 @@ class ChatsController extends StateNotifier<ChatsState> {
       case 'read':
         _applyRead(env);
         break;
+      case 'voice_played':
+        _applyVoicePlayed(env);
+        break;
       case 'typing':
       case 'conversation_added':
       case 'conversation_removed':
@@ -219,6 +222,8 @@ class ChatsController extends StateNotifier<ChatsState> {
       'senderId': wire['senderId'] ?? wire['sender_id'],
       'body': wire['body'],
       'createdAt': wire['createdAt'] ?? wire['created_at'],
+      if (wire['kind'] != null) 'kind': wire['kind'],
+      if (wire['voice'] != null) 'voice': wire['voice'],
     };
     final msg = Message.fromJson(normalized);
     final existing = state.messages[convId] ?? const <Message>[];
@@ -264,6 +269,90 @@ class ChatsController extends StateNotifier<ChatsState> {
         );
       }
     }
+  }
+
+  void _applyVoicePlayed(WsEnvelope env) {
+    final convId = (env['conversation_id'] as String?) ??
+        (env['conversationId'] as String?) ??
+        '';
+    final msgId =
+        (env['message_id'] as String?) ?? (env['messageId'] as String?) ?? '';
+    if (convId.isEmpty || msgId.isEmpty) return;
+    final list = state.messages[convId];
+    if (list == null) return;
+    final idx = list.indexWhere((m) => m.id == msgId);
+    if (idx < 0) return;
+    final m = list[idx];
+    final v = m.voice;
+    if (v == null || v.played) return;
+    final next = [...list];
+    next[idx] = m.copyWith(voice: v.copyWith(played: true));
+    state = state.copyWith(messages: {...state.messages, convId: next});
+  }
+
+  // --- voice optimistic ------------------------------------------------------
+
+  // Used by VoiceRecorderButton.onLocalVoiceMessage. Inserts a 'voice' message
+  // stub with status: pending while the SendVoiceMessage RPC is in flight.
+  void appendOptimisticVoice(
+    String convId,
+    String fileId,
+    int durationMs,
+    List<int> peaks,
+  ) {
+    final me = _ref.read(authControllerProvider).user;
+    final tempId = 'tmp_${DateTime.now().microsecondsSinceEpoch}_$fileId';
+    final voice = VoicePayload(
+      fileId: fileId,
+      durationMs: durationMs,
+      peaks: peaks,
+      played: false,
+    );
+    final m = Message(
+      id: tempId,
+      conversationId: convId,
+      senderId: me?.id ?? '',
+      body: '',
+      createdAt: DateTime.now(),
+      status: MessageStatus.pending,
+      tempId: tempId,
+      kind: 'voice',
+      voice: voice,
+    );
+    final existing = state.messages[convId] ?? const <Message>[];
+    state = state.copyWith(
+      messages: {...state.messages, convId: [...existing, m]},
+    );
+  }
+
+  // Swap the optimistic 'tmp_..._<fileId>' stub for the server-stamped row.
+  // Matched by suffix '_<fileId>' on tempId so concurrent uploads can't cross.
+  void replaceOptimisticVoice(
+    String convId,
+    String fileId,
+    String serverMessageId,
+    DateTime serverCreatedAt,
+  ) {
+    final list = state.messages[convId];
+    if (list == null) return;
+    final idx = list.indexWhere(
+      (m) => m.tempId != null && m.tempId!.endsWith('_$fileId'),
+    );
+    if (idx < 0) return;
+    // Guard against a WS echo already inserting the real row.
+    if (list.any((m) => m.id == serverMessageId && m.tempId == null)) {
+      final next = [...list]..removeAt(idx);
+      state = state.copyWith(messages: {...state.messages, convId: next});
+      return;
+    }
+    final old = list[idx];
+    final next = [...list];
+    next[idx] = old.copyWith(
+      id: serverMessageId,
+      createdAt: serverCreatedAt,
+      status: MessageStatus.sent,
+    );
+    state = state.copyWith(messages: {...state.messages, convId: next});
   }
 
   // --- helpers ---------------------------------------------------------------
