@@ -13,6 +13,11 @@ import '../api/dto.dart';
 import '../features/calls/screens/group_call_banner.dart';
 import '../features/calls/state/call_state.dart';
 import '../features/groups/widgets/group_info_modal.dart';
+import '../features/messaging/forward/forward_modal.dart';
+import '../features/messaging/reactions/reaction_picker.dart';
+import '../features/messaging/reactions/reaction_strip.dart';
+import '../features/messaging/replies/reply_compose_pill.dart';
+import '../features/messaging/replies/reply_quote_block.dart';
 import '../features/voice/widgets/voice_bubble.dart' as vw;
 import '../features/voice/widgets/voice_recorder_button.dart';
 import '../features/settings/widgets/profile_modal.dart';
@@ -123,9 +128,46 @@ class _ChatViewState extends ConsumerState<ChatView> {
     if (text.trim().isEmpty) return;
     _composer.clear();
     _composerFocus.requestFocus();
-    await ref
-        .read(chatsControllerProvider.notifier)
-        .send(widget.conversationId, text);
+    final replyTo = ref
+        .read(chatsControllerProvider)
+        .replyTargets[widget.conversationId];
+    final ctrl = ref.read(chatsControllerProvider.notifier);
+    if (replyTo != null && replyTo.isNotEmpty) {
+      await ctrl.sendRich(
+        convId: widget.conversationId,
+        body: text,
+        replyToMessageId: replyTo,
+      );
+    } else {
+      await ctrl.send(widget.conversationId, text);
+    }
+  }
+
+  // Scroll to a message by id and trigger a 1s ember pulse.
+  void _scrollToMessage(String messageId) {
+    final list =
+        ref.read(chatsControllerProvider).messages[widget.conversationId] ??
+            const <Message>[];
+    if (list.isEmpty || !_scroll.hasClients) {
+      ref.read(chatsControllerProvider.notifier).pulseMessage(messageId);
+      return;
+    }
+    // Approximate: items are oldest-first; index from the end maps to the
+    // reverse list position. We don't track exact bubble heights, so we
+    // anchor on the relative position and let the ListView jump.
+    final idx = list.indexWhere((m) => m.id == messageId);
+    if (idx < 0) {
+      ref.read(chatsControllerProvider.notifier).pulseMessage(messageId);
+      return;
+    }
+    final reversedIdx = list.length - 1 - idx;
+    final offset = (reversedIdx * 64.0).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.animateTo(
+      offset,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+    );
+    ref.read(chatsControllerProvider.notifier).pulseMessage(messageId);
   }
 
   void _showVoiceError(String msg) {
@@ -213,6 +255,17 @@ class _ChatViewState extends ConsumerState<ChatView> {
     final voiceApi = ref.read(voiceApiProvider);
     final voicePlayer = ref.watch(voicePlayerProvider);
     final connect = ref.read(connectClientProvider);
+    final replyTargetId = state.replyTargets[widget.conversationId];
+    final Message? replyTargetMsg = replyTargetId == null
+        ? null
+        : messages.cast<Message?>().firstWhere(
+              (m) => m?.id == replyTargetId,
+              orElse: () => null,
+            );
+    final pulseId = state.pulseMessageId;
+    final pulseTick = state.pulseTick;
+    // Build a quick lookup: messageId -> Message for reply-quote resolution.
+    final byMsgId = <String, Message>{for (final m in messages) m.id: m};
 
     return Column(
       children: [
@@ -279,10 +332,35 @@ class _ChatViewState extends ConsumerState<ChatView> {
                         },
                       );
                     }
-                    return _Bubble(message: m, isMine: isMine);
+                    return _Bubble(
+                      message: m,
+                      isMine: isMine,
+                      original: m.replyToMessageId != null
+                          ? byMsgId[m.replyToMessageId!]
+                          : null,
+                      onTapReply: m.replyToMessageId != null
+                          ? () => _scrollToMessage(m.replyToMessageId!)
+                          : null,
+                      onReply: () => ref
+                          .read(chatsControllerProvider.notifier)
+                          .setReplyTarget(widget.conversationId, m.id),
+                      onForward: () => _openForwardModal(m),
+                      onReact: (emoji) => _toggleReaction(m, emoji),
+                      onOpenPicker: (anchor) =>
+                          _openReactionPicker(m, anchor),
+                      pulseTick: pulseId == m.id ? pulseTick : 0,
+                    );
                   },
                 ),
         ),
+        if (replyTargetMsg != null)
+          ReplyComposePill(
+            message: replyTargetMsg,
+            senderName: _senderNameFor(replyTargetMsg, conv, me),
+            onCancel: () => ref
+                .read(chatsControllerProvider.notifier)
+                .setReplyTarget(widget.conversationId, null),
+          ),
         _Composer(
           controller: _composer,
           focusNode: _composerFocus,
@@ -313,6 +391,42 @@ class _ChatViewState extends ConsumerState<ChatView> {
           onVoiceError: _showVoiceError,
         ),
       ],
+    );
+  }
+
+  String _senderNameFor(Message m, Conversation conv, User? me) {
+    if (me != null && m.senderId == me.id) return 'yourself';
+    if (conv.peer != null && conv.peer!.id == m.senderId) {
+      final p = conv.peer!;
+      return p.displayName.isNotEmpty ? p.displayName : '@${p.handle}';
+    }
+    return 'them';
+  }
+
+  void _openForwardModal(Message m) {
+    showForwardModal(context, sourceMessage: m, ref: ref);
+  }
+
+  Future<void> _toggleReaction(Message m, String emoji) async {
+    final me = ref.read(authControllerProvider).user;
+    final api = ref.read(messagingApiProvider);
+    final mine = me != null &&
+        m.reactions.any((r) => r.userId == me.id && r.emoji == emoji);
+    try {
+      if (mine) {
+        await api.removeReaction(m.id, emoji);
+      } else {
+        await api.addReaction(m.id, emoji);
+      }
+    } catch (_) {/* WS will reconcile */}
+  }
+
+  void _openReactionPicker(Message m, Offset anchor) {
+    showReactionPickerOverlay(
+      context: context,
+      anchor: anchor,
+      message: m,
+      onPick: (emoji) => _toggleReaction(m, emoji),
     );
   }
 
@@ -463,70 +577,290 @@ class _TopBar extends ConsumerWidget {
   }
 }
 
-class _Bubble extends StatelessWidget {
-  const _Bubble({required this.message, required this.isMine});
+class _Bubble extends ConsumerStatefulWidget {
+  const _Bubble({
+    required this.message,
+    required this.isMine,
+    this.original,
+    this.onTapReply,
+    this.onReply,
+    this.onForward,
+    this.onReact,
+    this.onOpenPicker,
+    this.pulseTick = 0,
+  });
   final Message message;
   final bool isMine;
+  final Message? original;
+  final VoidCallback? onTapReply;
+  final VoidCallback? onReply;
+  final VoidCallback? onForward;
+  final void Function(String emoji)? onReact;
+  final void Function(Offset anchor)? onOpenPicker;
+  // Increments when this bubble should run a 1s ember pulse.
+  final int pulseTick;
+
+  @override
+  ConsumerState<_Bubble> createState() => _BubbleState();
+}
+
+class _BubbleState extends ConsumerState<_Bubble>
+    with SingleTickerProviderStateMixin {
+  bool _hover = false;
+  late AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    );
+    if (widget.pulseTick > 0) _pulse.forward(from: 0);
+  }
+
+  @override
+  void didUpdateWidget(covariant _Bubble old) {
+    super.didUpdateWidget(old);
+    if (widget.pulseTick != old.pulseTick && widget.pulseTick > 0) {
+      _pulse.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  void _openMenu(Offset global) {
+    final me = ref.read(authControllerProvider).user;
+    final hasMine = me != null &&
+        widget.message.reactions
+            .any((r) => r.userId == me.id);
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(global.dx, global.dy, global.dx, global.dy),
+      color: AppColors.panel,
+      items: [
+        const PopupMenuItem(
+          value: 'reply',
+          child: Row(children: [
+            Icon(Icons.reply, size: 16, color: AppColors.ink2),
+            SizedBox(width: 8),
+            Text('Reply'),
+          ]),
+        ),
+        const PopupMenuItem(
+          value: 'forward',
+          child: Row(children: [
+            Icon(Icons.forward, size: 16, color: AppColors.ink2),
+            SizedBox(width: 8),
+            Text('Forward'),
+          ]),
+        ),
+        PopupMenuItem(
+          value: 'react',
+          child: Row(children: [
+            const Icon(Icons.add_reaction_outlined,
+                size: 16, color: AppColors.ink2),
+            const SizedBox(width: 8),
+            Text(hasMine ? 'Change reaction' : 'React'),
+          ]),
+        ),
+      ],
+    ).then((v) {
+      if (!mounted || v == null) return;
+      switch (v) {
+        case 'reply':
+          widget.onReply?.call();
+          break;
+        case 'forward':
+          widget.onForward?.call();
+          break;
+        case 'react':
+          widget.onOpenPicker?.call(global);
+          break;
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
+    final isMine = widget.isMine;
+    final message = widget.message;
     final align = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-    final bubbleColor = isMine ? AppColors.ember.withAlpha(40) : AppColors.raised;
-    final borderColor = isMine ? AppColors.ember.withAlpha(70) : AppColors.line;
+    final bubbleColor =
+        isMine ? AppColors.ember.withAlpha(40) : AppColors.raised;
+    final borderColor =
+        isMine ? AppColors.ember.withAlpha(70) : AppColors.line;
+    final me = ref.watch(authControllerProvider).user;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+    final hasForward = message.forwardOriginText.isNotEmpty ||
+        (message.forwardFromUserId != null &&
+            message.forwardFromUserId!.isNotEmpty);
+
+    final bubble = Container(
+      constraints: const BoxConstraints(maxWidth: 520),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        border: Border.all(color: borderColor),
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(AppRadii.rLg),
+          topRight: const Radius.circular(AppRadii.rLg),
+          bottomLeft:
+              Radius.circular(isMine ? AppRadii.rLg : AppRadii.rSm),
+          bottomRight:
+              Radius.circular(isMine ? AppRadii.rSm : AppRadii.rLg),
+        ),
+      ),
       child: Column(
-        crossAxisAlignment: align,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            constraints: const BoxConstraints(maxWidth: 520),
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-            decoration: BoxDecoration(
-              color: bubbleColor,
-              border: Border.all(color: borderColor),
-              borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(AppRadii.rLg),
-                topRight: const Radius.circular(AppRadii.rLg),
-                bottomLeft: Radius.circular(
-                    isMine ? AppRadii.rLg : AppRadii.rSm),
-                bottomRight: Radius.circular(
-                    isMine ? AppRadii.rSm : AppRadii.rLg),
+          if (hasForward)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                message.forwardOriginText.isNotEmpty
+                    ? 'Forwarded from ${message.forwardOriginText}'
+                    : 'Forwarded',
+                style: const TextStyle(
+                  color: AppColors.emberSoft,
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic,
+                ),
               ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  message.renderedBody,
-                  style: const TextStyle(
-                    color: AppColors.ink1,
-                    fontSize: 14,
-                    height: 1.35,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      DateFormat.Hm().format(message.createdAt),
-                      style: const TextStyle(
-                          color: AppColors.ink3, fontSize: 10.5),
-                    ),
-                    if (isMine) ...[
-                      const SizedBox(width: 4),
-                      _StatusIcon(status: message.status),
-                    ],
-                  ],
-                ),
-              ],
+          if (message.replyToMessageId != null)
+            ReplyQuoteBlock(
+              original: widget.original,
+              senderName: widget.original == null
+                  ? '…'
+                  : (me != null && widget.original!.senderId == me.id
+                      ? 'You'
+                      : 'Reply'),
+              onTap: widget.onTapReply ?? () {},
             ),
+          if (message.renderedBody.isNotEmpty)
+            Text(
+              message.renderedBody,
+              style: const TextStyle(
+                color: AppColors.ink1,
+                fontSize: 14,
+                height: 1.35,
+              ),
+            ),
+          const SizedBox(height: 2),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                DateFormat.Hm().format(message.createdAt),
+                style:
+                    const TextStyle(color: AppColors.ink3, fontSize: 10.5),
+              ),
+              if (isMine) ...[
+                const SizedBox(width: 4),
+                _StatusIcon(status: message.status),
+              ],
+            ],
           ),
         ],
       ),
     );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.deferToChild,
+          onSecondaryTapDown: (d) => _openMenu(d.globalPosition),
+          onLongPressStart: (d) => _openMenu(d.globalPosition),
+          child: Column(
+            crossAxisAlignment: align,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  AnimatedBuilder(
+                    animation: _pulse,
+                    builder: (_, child) {
+                      final v = (1 - _pulse.value).clamp(0.0, 1.0);
+                      return Container(
+                        decoration: BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(AppRadii.rLg),
+                          boxShadow: v > 0
+                              ? [
+                                  BoxShadow(
+                                    color: AppColors.ember
+                                        .withAlpha((180 * v).toInt()),
+                                    blurRadius: 12,
+                                    spreadRadius: 1,
+                                  )
+                                ]
+                              : const [],
+                        ),
+                        child: child,
+                      );
+                    },
+                    child: bubble,
+                  ),
+                  if (_hover && widget.onOpenPicker != null)
+                    Positioned(
+                      top: -8,
+                      right: isMine ? null : -8,
+                      left: isMine ? -8 : null,
+                      child: _ReactQuickButton(
+                        onTap: (anchor) =>
+                            widget.onOpenPicker!.call(anchor),
+                      ),
+                    ),
+                ],
+              ),
+              if (message.reactions.isNotEmpty)
+                ReactionStrip(
+                  reactions: message.reactions,
+                  currentUserId: me?.id,
+                  onToggle: (e) => widget.onReact?.call(e),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReactQuickButton extends StatelessWidget {
+  const _ReactQuickButton({required this.onTap});
+  final void Function(Offset anchor) onTap;
+  @override
+  Widget build(BuildContext context) {
+    return Builder(builder: (ctx) {
+      return Material(
+        color: AppColors.panel,
+        shape: const CircleBorder(side: BorderSide(color: AppColors.line)),
+        elevation: 2,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: () {
+            final box = ctx.findRenderObject() as RenderBox?;
+            final anchor = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+            onTap(anchor);
+          },
+          child: const Padding(
+            padding: EdgeInsets.all(4),
+            child: Icon(Icons.add_reaction_outlined,
+                size: 14, color: AppColors.ink2),
+          ),
+        ),
+      );
+    });
   }
 }
 
