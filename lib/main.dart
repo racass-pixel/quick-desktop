@@ -11,6 +11,7 @@ import 'features/calls/widgets/call_pip.dart';
 import 'features/calls/widgets/incoming_call_dialog.dart';
 import 'router.dart';
 import 'services/notifications_bridge.dart';
+import 'services/os_notifier.dart';
 import 'services/tray.dart';
 import 'state/providers.dart';
 import 'state/window_focus.dart';
@@ -56,13 +57,18 @@ class _QuickAppState extends ConsumerState<QuickApp> with WindowListener {
       ref.read(authControllerProvider.notifier).bootstrap();
       // Touch the updater provider so the polling loop spins up.
       ref.read(updaterServiceProvider);
-      // Spin up the WS → toasts bridge — first read instantiates it.
-      ref.read(notificationsBridgeProvider);
       // Tray with bound callbacks. Open = show + focus, Quit = real exit.
       await TrayService.instance.init(
         onOpen: _restoreWindow,
         onQuit: _quitApp,
       );
+      // OS-level toast plumbing. Registers an AppUserModelID so Windows
+      // shows Quick's icon and app name on the toast. The init is idempotent
+      // -- hot-reload will hit the _inited guard inside the service.
+      await OsNotifier.instance.init(appId: 'com.racasspixel.quick');
+      // Spin up the WS bridge AFTER OsNotifier is ready so the very first
+      // envelope we see can route to a real toast if the window is hidden.
+      ref.read(notificationsBridgeProvider);
       // Seed the focused flag from the current state.
       try {
         final focused = await windowManager.isFocused();

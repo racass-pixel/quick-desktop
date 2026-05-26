@@ -1,16 +1,24 @@
-// WS → Toaster bridge. Subscribes to the realtime envelope stream and emits
-// in-app toasts for events the user would want to know about while doing
+// WS -> Toaster bridge. Subscribes to the realtime envelope stream and emits
+// notifications for events the user would want to know about while doing
 // something else in the app:
 //   - new message in a chat that is not currently focused
 //   - incoming 1:1 call (sticky toast with Accept / Decline)
 //   - group call started in one of our chats (Join toast)
 //
+// Output routing:
+//   - When the Quick window is focused (and not minimized to tray), use the
+//     in-app Toaster -- the user is here, so a soft in-app banner is best.
+//   - When the window is hidden / minimized / unfocused, fire a real Windows
+//     toast via OsNotifier so the user sees it from another app or after
+//     coming back to the desk.
+//   - Calls (incoming + group call started) ALWAYS fire the OS toast in
+//     addition to the in-app toast. Calls are urgent and the user might be
+//     in another app even if Quick happens to be focused on a second monitor.
+//
 // Suppression rules:
 //   - Skip message toasts when our own user sent the message.
 //   - Skip message toasts when the window is focused AND the message belongs
 //     to the conversation the user is currently viewing.
-//   - Always show call-related toasts — those are the whole point of keeping
-//     the WS alive while minimized to the tray.
 
 import 'dart:async';
 
@@ -20,6 +28,7 @@ import 'package:window_manager/window_manager.dart';
 import '../api/dto.dart';
 import '../api/realtime.dart';
 import '../features/calls/state/call_state.dart';
+import '../services/os_notifier.dart';
 import '../services/toaster.dart';
 import '../state/chats_controller.dart';
 import '../state/providers.dart';
@@ -28,10 +37,15 @@ import '../state/window_focus.dart';
 class NotificationsBridge {
   NotificationsBridge(this._ref) {
     _sub = _ref.read(realtimeProvider).envelopes.listen(_onEnvelope);
+    // Activations come from the OS toast layer (user clicked the toast or one
+    // of its buttons). The bridge owns the routing because it already has the
+    // chat / call notifier handles in scope.
+    _activationSub = OsNotifier.instance.activations.listen(_onActivation);
   }
 
   final Ref _ref;
   StreamSubscription<WsEnvelope>? _sub;
+  StreamSubscription<NotificationActivation>? _activationSub;
 
   /// Set by the shell once GoRouter is mounted. The bridge invokes it to
   /// navigate when the user clicks a toast. Held as a function so the bridge
@@ -50,10 +64,13 @@ class NotificationsBridge {
         break;
       case 'call_ended':
       case 'call_declined':
-        // Drop any sticky incoming-call toast for this call id.
+        // Drop any sticky incoming-call toast for this call id, both in-app
+        // and in the OS notification center.
         final id = _str(env, 'call_id', 'callId');
         if (id.isNotEmpty) {
           Toaster.instance.dismiss('incoming-call:$id');
+          // ignore: discarded_futures
+          OsNotifier.instance.dismiss('incoming-call:$id');
         }
         break;
       case 'group_call_started':
@@ -63,6 +80,8 @@ class NotificationsBridge {
         final convId = _str(env, 'conversation_id', 'conversationId');
         if (convId.isNotEmpty) {
           Toaster.instance.dismiss('group-call:$convId');
+          // ignore: discarded_futures
+          OsNotifier.instance.dismiss('group-call:$convId');
         }
         break;
       default:
@@ -86,6 +105,9 @@ class NotificationsBridge {
 
     final chats = _ref.read(chatsControllerProvider);
     final focused = _ref.read(windowFocusedProvider);
+    // Only the "already viewing this chat" suppression rule applies in the
+    // focused branch -- when the window is hidden the user is by definition
+    // not viewing anything, so we always notify.
     if (focused && chats.activeConvId == convId) return;
 
     // Build a synthetic Message for the preview path.
@@ -119,16 +141,32 @@ class NotificationsBridge {
     }
 
     final id = 'msg:$convId:${msg.id}';
-    Toaster.instance.show(ToastSpec(
-      id: id,
-      kind: ToastKind.text,
-      title: title,
-      body: body,
-      avatarSeed: seedColor.$1,
-      avatarColorHex: seedColor.$2,
-      conversationId: convId,
-      onTap: () => _navigateToChat(convId),
-    ));
+    if (focused) {
+      // Window is here -- give the user a soft in-app toast they can interact
+      // with without losing context.
+      Toaster.instance.show(ToastSpec(
+        id: id,
+        kind: ToastKind.text,
+        title: title,
+        body: body,
+        avatarSeed: seedColor.$1,
+        avatarColorHex: seedColor.$2,
+        conversationId: convId,
+        onTap: () => _navigateToChat(convId),
+      ));
+    } else {
+      // Window is hidden / minimized to tray / unfocused -- the user isn't
+      // looking at us, so we go through the OS notification surface so the
+      // alert shows up in the Action Center and on the desktop.
+      // ignore: discarded_futures
+      OsNotifier.instance.show(
+        id: id,
+        title: title,
+        body: body,
+        kind: NotificationKind.message,
+        data: {'conversationId': convId},
+      );
+    }
   }
 
   void _onIncomingCall(WsEnvelope env) {
@@ -177,6 +215,19 @@ class NotificationsBridge {
         } catch (_) {/* best effort */}
       },
     ));
+
+    // Always also raise an OS toast for incoming calls. The user might be in
+    // another app even if the Quick window is technically focused (multi-
+    // monitor setups), and the Action Center entry is a useful safety net if
+    // they miss the ring.
+    // ignore: discarded_futures
+    OsNotifier.instance.show(
+      id: 'incoming-call:$id',
+      title: 'Incoming ${video ? 'video ' : ''}call',
+      body: name,
+      kind: NotificationKind.incomingCall,
+      data: {'callId': id},
+    );
   }
 
   void _onGroupCallStarted(WsEnvelope env) {
@@ -226,6 +277,65 @@ class NotificationsBridge {
         _navigateToChat(convId);
       },
     ));
+
+    // Always also raise an OS toast for group calls -- same reasoning as the
+    // 1:1 incoming-call path. The Join button on the OS toast lets the user
+    // jump in without restoring the window first.
+    // ignore: discarded_futures
+    OsNotifier.instance.show(
+      id: 'group-call:$convId',
+      title: title,
+      body: 'Voice chat started',
+      kind: NotificationKind.groupCall,
+      data: {'conversationId': convId, 'callId': callId},
+    );
+  }
+
+  Future<void> _onActivation(NotificationActivation a) async {
+    switch (a.kind) {
+      case NotificationKind.message:
+        final convId = a.data['conversationId'] ?? '';
+        if (convId.isEmpty) return;
+        await _bringToFront();
+        _navigateToChat(convId);
+        break;
+      case NotificationKind.incomingCall:
+        if (a.action == 'accept') {
+          await _bringToFront();
+          try {
+            await _ref.read(callNotifierProvider).acceptIncoming();
+          } catch (_) {/* error UX lives on the dialog */}
+        } else if (a.action == 'decline') {
+          // No window restore on decline -- the user is choosing to dismiss
+          // without engaging, dragging Quick to the front would be hostile.
+          try {
+            await _ref.read(callNotifierProvider).declineIncoming();
+          } catch (_) {/* best effort */}
+        } else {
+          // Plain body click -- treat as "show me the call" so the incoming
+          // dialog can be answered with the in-app controls.
+          await _bringToFront();
+        }
+        break;
+      case NotificationKind.groupCall:
+        final convId = a.data['conversationId'] ?? '';
+        final callId = a.data['callId'] ?? '';
+        if (a.action == 'join') {
+          if (callId.isEmpty || convId.isEmpty) return;
+          await _bringToFront();
+          try {
+            // ignore: discarded_futures
+            _ref
+                .read(groupCallNotifierProvider)
+                .joinGroupCall(callId, convId);
+          } catch (_) {/* surface via banner */}
+          _navigateToChat(convId);
+        } else if (convId.isNotEmpty) {
+          await _bringToFront();
+          _navigateToChat(convId);
+        }
+        break;
+    }
   }
 
   Future<void> _bringToFront() async {
@@ -281,6 +391,8 @@ class NotificationsBridge {
   Future<void> dispose() async {
     await _sub?.cancel();
     _sub = null;
+    await _activationSub?.cancel();
+    _activationSub = null;
   }
 }
 
