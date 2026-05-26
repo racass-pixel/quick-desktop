@@ -2,10 +2,12 @@
 //
 // Mirrors the wire shapes in `quick-protocol/proto/quick/v1/messaging.proto`:
 //
-//   CreateGroupRequest    { title, member_user_ids[] }
-//   CreateChannelRequest  { title, subscriber_user_ids[] }
-//   AddMembersRequest     { conversation_id, user_ids[] }
-//   RemoveMemberRequest   { conversation_id, user_id }
+//   CreateGroupRequest        { title, member_user_ids[] }
+//   CreateChannelRequest      { title, subscriber_user_ids[] }
+//   AddMembersRequest         { conversation_id, user_ids[] }
+//   RemoveMemberRequest       { conversation_id, user_id }
+//   ListMembersRequest        { conversation_id }
+//   LeaveConversationRequest  { conversation_id }
 //
 // The desktop UI keeps create + add as separate user steps (TG-style), so the
 // CreateGroup / CreateChannel calls here accept an empty member list and
@@ -13,6 +15,36 @@
 
 import '../../../api/connect.dart';
 import '../../../api/dto.dart';
+
+class Member {
+  Member({
+    required this.user,
+    required this.role,
+    this.joinedAt,
+  });
+
+  // Server may omit `user` for rows whose user record was deleted — callers
+  // should skip those.
+  final User? user;
+  final String role;
+  final DateTime? joinedAt;
+
+  factory Member.fromJson(Map<String, dynamic> j) {
+    final u = j['user'];
+    DateTime? joined;
+    final ja = j['joinedAt'] ?? j['joined_at'];
+    if (ja is String && ja.isNotEmpty) {
+      joined = DateTime.tryParse(ja)?.toLocal();
+    }
+    return Member(
+      user: u is Map<String, dynamic>
+          ? User.fromJson(u)
+          : (u is Map ? User.fromJson(u.cast<String, dynamic>()) : null),
+      role: (j['role'] as String?) ?? 'member',
+      joinedAt: joined,
+    );
+  }
+}
 
 class GroupsApi {
   GroupsApi(this._c);
@@ -61,6 +93,23 @@ class GroupsApi {
     await _c.call('quick.v1.Messaging', 'RemoveMember', {
       'conversationId': conversationId,
       'userId': userId,
+    });
+  }
+
+  Future<List<Member>> listMembers(String conversationId) async {
+    final res = await _c.call('quick.v1.Messaging', 'ListMembers', {
+      'conversationId': conversationId,
+    });
+    final list = (res['members'] as List?) ?? const [];
+    return list
+        .whereType<Map>()
+        .map((m) => Member.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<void> leaveConversation(String conversationId) async {
+    await _c.call('quick.v1.Messaging', 'LeaveConversation', {
+      'conversationId': conversationId,
     });
   }
 }

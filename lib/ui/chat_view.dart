@@ -12,12 +12,14 @@ import 'package:intl/intl.dart';
 import '../api/dto.dart';
 import '../features/calls/screens/group_call_banner.dart';
 import '../features/calls/state/call_state.dart';
+import '../features/groups/widgets/group_info_modal.dart';
 import '../features/voice/widgets/voice_bubble.dart' as vw;
 import '../features/voice/widgets/voice_recorder_button.dart';
 import '../features/settings/widgets/profile_modal.dart';
 import '../state/chats_controller.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
+import 'service_message.dart';
 import 'widgets/avatar.dart';
 
 class ChatView extends ConsumerStatefulWidget {
@@ -166,6 +168,26 @@ class _ChatViewState extends ConsumerState<ChatView> {
     );
   }
 
+  // Group / channel header: tap opens the GroupInfoModal (members, add,
+  // leave). The DM equivalent is the peer ProfileModal above.
+  void _openGroupInfo(Conversation conv) {
+    final groupsApi = ref.read(groupsApiProvider);
+    final usersApi = ref.read(settingsUsersApiProvider);
+    showGroupInfoModal(
+      context,
+      conversation: conv,
+      groupsApi: groupsApi,
+      usersApi: usersApi,
+      onLeft: () {
+        // After leaving, refresh the conversations list so the sidebar drops
+        // this chat, and route back to the empty pane.
+        // ignore: discarded_futures
+        ref.read(chatsControllerProvider.notifier).loadConversations();
+        if (mounted) GoRouter.of(context).go('/');
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(chatsControllerProvider);
@@ -194,7 +216,11 @@ class _ChatViewState extends ConsumerState<ChatView> {
 
     return Column(
       children: [
-        _TopBar(conv: conv, onPeerTap: () => _openPeerProfile(conv)),
+        _TopBar(
+          conv: conv,
+          onPeerTap: () => _openPeerProfile(conv),
+          onGroupTap: () => _openGroupInfo(conv),
+        ),
         if (isGroup)
           GroupCallBanner(
             conversationId: widget.conversationId,
@@ -231,6 +257,13 @@ class _ChatViewState extends ConsumerState<ChatView> {
                     if (item is _DaySep) return _DaySeparator(day: item.day);
                     final m = item as Message;
                     final isMine = me != null && m.senderId == me.id;
+                    // Service messages: the `kind` field is stripped over HTTP
+                    // (not in the proto), so we also sniff the body for a
+                    // `{type: "..."}` JSON envelope. Either signal routes the
+                    // bubble through the centered pill renderer.
+                    if (m.kind == 'service' || looksLikeServicePayload(m.body)) {
+                      return ServiceMessageBubble(message: m);
+                    }
                     if (m.kind == 'voice' && m.voice != null) {
                       return _VoiceBubbleRow(
                         message: m,
@@ -341,12 +374,21 @@ class _DaySeparator extends StatelessWidget {
 }
 
 class _TopBar extends ConsumerWidget {
-  const _TopBar({required this.conv, required this.onPeerTap});
+  const _TopBar({
+    required this.conv,
+    required this.onPeerTap,
+    required this.onGroupTap,
+  });
   final Conversation conv;
   final VoidCallback onPeerTap;
+  final VoidCallback onGroupTap;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isDm = conv.peer != null;
+    final isGroup = conv.type == 'group' || conv.type == 'channel';
+    final VoidCallback? headerTap = isDm
+        ? onPeerTap
+        : (isGroup ? onGroupTap : null);
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -357,7 +399,7 @@ class _TopBar extends ConsumerWidget {
       child: Row(
         children: [
           GestureDetector(
-            onTap: isDm ? onPeerTap : null,
+            onTap: headerTap,
             child: Avatar(
                 name: conv.avatarSeed(),
                 colorHex: conv.avatarColorHex(),
@@ -366,7 +408,7 @@ class _TopBar extends ConsumerWidget {
           const SizedBox(width: 12),
           Expanded(
             child: GestureDetector(
-              onTap: isDm ? onPeerTap : null,
+              onTap: headerTap,
               behavior: HitTestBehavior.opaque,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
