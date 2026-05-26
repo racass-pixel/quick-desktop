@@ -96,15 +96,29 @@ void _onIncomingCall(CallsWsEnvelope env, CallNotifier call) {
 }
 
 void _onGroupCallStarted(CallsWsEnvelope env, GroupCallNotifier group) {
+  // Backend sends a flat envelope: { kind, conversation_id, call_id,
+  // room_name, started_by }. Older variants nest the GroupCall under `call`.
+  // Accept either shape.
   final raw = env['call'];
   if (raw is Map) {
-    group.onGroupCallStarted(
-      GroupCallDto.fromJson(raw.cast<String, dynamic>()),
-    );
+    final dto = GroupCallDto.fromJson(raw.cast<String, dynamic>());
+    // The started envelope doesn't always include a participant_count — the
+    // call begins with exactly the starter (1). Coerce the floor so the
+    // banner reads sensibly out of the gate.
+    final coerced = dto.participantCount > 0
+        ? dto
+        : GroupCallDto(
+            id: dto.id,
+            conversationId: dto.conversationId,
+            startedBy: dto.startedBy,
+            roomName: dto.roomName,
+            participantCount: 1,
+            startedAt: dto.startedAt,
+          );
+    group.onGroupCallStarted(coerced);
     return;
   }
-  // Some backends fan a flat envelope rather than nesting the GroupCall —
-  // synthesize a minimal DTO so the banner still appears.
+  // Flat envelope — synthesize a minimal DTO so the banner appears.
   final convId = _str(env, 'conversation_id', 'conversationId');
   final id = _str(env, 'call_id', 'callId');
   if (convId.isEmpty || id.isEmpty) return;
