@@ -24,6 +24,8 @@ import '../features/messaging/reactions/reaction_picker.dart';
 import '../features/messaging/reactions/reaction_strip.dart';
 import '../features/messaging/replies/reply_compose_pill.dart';
 import '../features/messaging/replies/reply_quote_block.dart';
+import '../features/messaging/search/search_bar.dart';
+import '../features/messaging/search/search_results.dart';
 import '../features/voice/widgets/voice_bubble.dart' as vw;
 import '../features/voice/widgets/voice_recorder_button.dart';
 import '../features/settings/widgets/profile_modal.dart';
@@ -54,6 +56,11 @@ class _ChatViewState extends ConsumerState<ChatView> {
   // Per-chat-view upload queue. Files are appended as the user picks them
   // and drained into `attachmentFileIds` when the next message is sent.
   final UploadQueue _uploads = UploadQueue();
+  // In-pane search state — driven by the magnifier toggle in the top bar.
+  bool _searchOpen = false;
+  String _searchQuery = '';
+  List<Message> _searchResults = const [];
+  bool _searchBusy = false;
 
   @override
   void initState() {
@@ -284,7 +291,47 @@ class _ChatViewState extends ConsumerState<ChatView> {
           conv: conv,
           onPeerTap: () => _openPeerProfile(conv),
           onGroupTap: () => _openGroupInfo(conv),
+          onToggleSearch: () => setState(() {
+            _searchOpen = !_searchOpen;
+            if (!_searchOpen) {
+              _searchQuery = '';
+              _searchResults = const [];
+            }
+          }),
+          searchOpen: _searchOpen,
         ),
+        if (_searchOpen)
+          Container(
+            color: AppColors.panel,
+            child: Column(
+              children: [
+                MessageSearchBar(
+                  hint: 'Search in this chat',
+                  autofocus: true,
+                  onQuery: _runInPaneSearch,
+                ),
+                if (_searchQuery.isNotEmpty)
+                  SizedBox(
+                    height: 280,
+                    child: MessageSearchResults(
+                      query: _searchQuery,
+                      results: _searchResults,
+                      conversations: state.byId,
+                      busy: _searchBusy,
+                      onOpen: (m) {
+                        setState(() {
+                          _searchOpen = false;
+                          _searchQuery = '';
+                          _searchResults = const [];
+                        });
+                        _scrollToMessage(m.id);
+                      },
+                    ),
+                  ),
+                const Divider(height: 1),
+              ],
+            ),
+          ),
         if (isGroup)
           GroupCallBanner(
             conversationId: widget.conversationId,
@@ -434,6 +481,31 @@ class _ChatViewState extends ConsumerState<ChatView> {
     } catch (_) {/* WS will reconcile */}
   }
 
+  Future<void> _runInPaneSearch(String q) async {
+    setState(() => _searchQuery = q);
+    if (q.isEmpty) {
+      setState(() {
+        _searchResults = const [];
+        _searchBusy = false;
+      });
+      return;
+    }
+    setState(() => _searchBusy = true);
+    try {
+      final results = await ref.read(messagingApiProvider).searchMessages(
+            query: q,
+            conversationId: widget.conversationId,
+            limit: 40,
+          );
+      if (!mounted) return;
+      setState(() => _searchResults = results);
+    } catch (_) {
+      if (mounted) setState(() => _searchResults = const []);
+    } finally {
+      if (mounted) setState(() => _searchBusy = false);
+    }
+  }
+
   void _openReactionPicker(Message m, Offset anchor) {
     showReactionPickerOverlay(
       context: context,
@@ -505,10 +577,14 @@ class _TopBar extends ConsumerWidget {
     required this.conv,
     required this.onPeerTap,
     required this.onGroupTap,
+    required this.onToggleSearch,
+    required this.searchOpen,
   });
   final Conversation conv;
   final VoidCallback onPeerTap;
   final VoidCallback onGroupTap;
+  final VoidCallback onToggleSearch;
+  final bool searchOpen;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isDm = conv.peer != null;
@@ -556,6 +632,12 @@ class _TopBar extends ConsumerWidget {
                 ],
               ),
             ),
+          ),
+          IconButton(
+            tooltip: searchOpen ? 'Close search' : 'Search in chat',
+            icon: Icon(searchOpen ? Icons.close : Icons.search,
+                size: 18, color: AppColors.ink2),
+            onPressed: onToggleSearch,
           ),
           if (isDm)
             IconButton(

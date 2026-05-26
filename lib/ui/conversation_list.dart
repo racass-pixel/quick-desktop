@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../api/dto.dart';
 import '../features/calls/state/call_state.dart';
+import '../features/messaging/search/search_results.dart';
 import '../features/settings/widgets/profile_modal.dart';
 import '../state/chats_controller.dart';
 import '../state/providers.dart';
@@ -24,7 +25,9 @@ class _ConversationListPaneState extends ConsumerState<ConversationListPane> {
   final _searchCtrl = TextEditingController();
   Timer? _debounce;
   List<User> _searchResults = const [];
+  List<Message> _msgResults = const [];
   bool _searching = false;
+  String _q = '';
 
   @override
   void dispose() {
@@ -36,9 +39,11 @@ class _ConversationListPaneState extends ConsumerState<ConversationListPane> {
   void _onSearchChanged(String v) {
     _debounce?.cancel();
     final q = v.trim();
+    setState(() => _q = q);
     if (q.isEmpty) {
       setState(() {
         _searchResults = const [];
+        _msgResults = const [];
         _searching = false;
       });
       return;
@@ -46,15 +51,37 @@ class _ConversationListPaneState extends ConsumerState<ConversationListPane> {
     _debounce = Timer(const Duration(milliseconds: 300), () async {
       setState(() => _searching = true);
       try {
-        final users = await ref.read(usersApiProvider).search(q);
+        // Fire both queries in parallel; user search is a prefix lookup
+        // while message search is full-text.
+        final usersFut = ref.read(usersApiProvider).search(q);
+        final msgsFut = q.length >= 2
+            ? ref.read(messagingApiProvider).searchMessages(query: q, limit: 20)
+            : Future<List<Message>>.value(const <Message>[]);
+        final results = await Future.wait([usersFut, msgsFut]);
         if (!mounted) return;
-        setState(() => _searchResults = users);
+        setState(() {
+          _searchResults = results[0] as List<User>;
+          _msgResults = results[1] as List<Message>;
+        });
       } catch (_) {
-        if (mounted) setState(() => _searchResults = const []);
+        if (mounted) {
+          setState(() {
+            _searchResults = const [];
+            _msgResults = const [];
+          });
+        }
       } finally {
         if (mounted) setState(() => _searching = false);
       }
     });
+  }
+
+  Future<void> _openMessageResult(Message m) async {
+    final ctrl = ref.read(chatsControllerProvider.notifier);
+    // Make sure the chat is hydrated, then route and pulse.
+    await ctrl.loadMessages(m.conversationId);
+    ctrl.pulseMessage(m.id);
+    if (mounted) context.go('/chats/${m.conversationId}');
   }
 
   Future<void> _startDmWith(User peer) async {
@@ -86,10 +113,15 @@ class _ConversationListPaneState extends ConsumerState<ConversationListPane> {
           ),
         ),
         if (_searchCtrl.text.trim().isNotEmpty)
-          Expanded(child: _SearchResults(
-            results: _searchResults,
+          Expanded(
+              child: _GlobalSearchPane(
+            users: _searchResults,
+            messages: _msgResults,
+            byConv: state.byId,
             busy: _searching,
-            onTap: _startDmWith,
+            query: _q,
+            onTapUser: _startDmWith,
+            onTapMessage: _openMessageResult,
           ))
         else
           Expanded(
@@ -167,6 +199,135 @@ class _EmptyState extends StatelessWidget {
           'No chats yet. Search a @handle to start one.',
           textAlign: TextAlign.center,
           style: TextStyle(color: AppColors.ink3, fontSize: 13),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlobalSearchPane extends StatelessWidget {
+  const _GlobalSearchPane({
+    required this.users,
+    required this.messages,
+    required this.byConv,
+    required this.busy,
+    required this.query,
+    required this.onTapUser,
+    required this.onTapMessage,
+  });
+  final List<User> users;
+  final List<Message> messages;
+  final Map<String, Conversation> byConv;
+  final bool busy;
+  final String query;
+  final void Function(User) onTapUser;
+  final void Function(Message) onTapMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    if (busy && users.isEmpty && messages.isEmpty) {
+      return const Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    final empty = users.isEmpty && messages.isEmpty;
+    if (empty) {
+      return const Center(
+        child: Text('No matches',
+            style: TextStyle(color: AppColors.ink3, fontSize: 13)),
+      );
+    }
+    return ListView(
+      children: [
+        if (users.isNotEmpty) ...[
+          const _SectionHeader('Chats'),
+          for (final u in users) _UserRow(user: u, onTap: () => onTapUser(u)),
+        ],
+        if (messages.isNotEmpty) ...[
+          const _SectionHeader('Messages'),
+          SizedBox(
+            height: (messages.length * 64.0).clamp(64, 480),
+            child: MessageSearchResults(
+              query: query,
+              results: messages,
+              conversations: byConv,
+              onOpen: onTapMessage,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.label);
+  final String label;
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+      child: Text(
+        label.toUpperCase(),
+        style: const TextStyle(
+          color: AppColors.ink3,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+}
+
+class _UserRow extends StatelessWidget {
+  const _UserRow({required this.user, required this.onTap});
+  final User user;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              Avatar(
+                name: user.displayName.isNotEmpty
+                    ? user.displayName
+                    : user.handle,
+                colorHex: user.avatarColor,
+                size: 36,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      user.displayName.isNotEmpty
+                          ? user.displayName
+                          : user.handle,
+                      style: const TextStyle(
+                        color: AppColors.ink1,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text('@${user.handle}',
+                        style: const TextStyle(
+                            color: AppColors.ink3, fontSize: 12)),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
