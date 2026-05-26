@@ -39,8 +39,17 @@ ThemeData buildAppTheme() {
     colorScheme: scheme,
     scaffoldBackgroundColor: AppColors.bg,
     canvasColor: AppColors.bg,
+    cardColor: AppColors.panel,
+    dialogBackgroundColor: AppColors.panel,
     fontFamily: baseFont,
     splashFactory: NoSplash.splashFactory,
+    // Material's default hover/focus/highlight overlays paint a flat grey
+    // wash on dark themes. We disable them globally and let widgets that
+    // want a hover effect opt back in with a custom Color/Material.
+    hoverColor: Colors.transparent,
+    focusColor: Colors.transparent,
+    highlightColor: Colors.transparent,
+    splashColor: Colors.transparent,
     visualDensity: VisualDensity.compact,
   );
 
@@ -103,6 +112,47 @@ ThemeData buildAppTheme() {
       color: AppColors.line,
       thickness: 1,
       space: 1,
+    ),
+    // Material 3 IconButton paints its own state-layer overlay
+    // (colorScheme.onSurfaceVariant) on hover — independent of theme
+    // hoverColor. Force it transparent so a hovered IconButton does
+    // not flash a grey rectangle behind the icon.
+    iconButtonTheme: IconButtonThemeData(
+      style: ButtonStyle(
+        overlayColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.hovered)
+              ? Colors.white.withValues(alpha: 0.04)
+              : Colors.transparent,
+        ),
+      ),
+    ),
+    // Same story for MenuButton / popup items.
+    menuButtonTheme: MenuButtonThemeData(
+      style: ButtonStyle(
+        overlayColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.hovered)
+              ? Colors.white.withValues(alpha: 0.04)
+              : Colors.transparent,
+        ),
+      ),
+    ),
+    cardTheme: const CardThemeData(
+      color: AppColors.panel,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+    ),
+    tooltipTheme: TooltipThemeData(
+      preferBelow: true,
+      waitDuration: const Duration(milliseconds: 400),
+      decoration: BoxDecoration(
+        color: AppColors.raised,
+        borderRadius: BorderRadius.circular(AppRadii.rSm),
+        border: Border.all(color: AppColors.line),
+      ),
+      textStyle: const TextStyle(
+        color: AppColors.ink1,
+        fontSize: 12,
+      ),
     ),
   );
 }
