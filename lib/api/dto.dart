@@ -54,6 +54,8 @@ class Message {
     required this.createdAt,
     this.status = MessageStatus.sent,
     this.tempId,
+    this.kind = 'text',
+    this.voice,
   });
 
   final String id;
@@ -64,11 +66,17 @@ class Message {
   final MessageStatus status;
   // Local-only: tempId is set on optimistic stubs awaiting server ack.
   final String? tempId;
+  // 'text' | 'voice' | 'service'. Defaults to 'text' for backward compat.
+  final String kind;
+  // Populated when kind == 'voice'.
+  final VoicePayload? voice;
 
   Message copyWith({
     String? id,
     MessageStatus? status,
     DateTime? createdAt,
+    String? kind,
+    VoicePayload? voice,
   }) =>
       Message(
         id: id ?? this.id,
@@ -78,18 +86,79 @@ class Message {
         createdAt: createdAt ?? this.createdAt,
         status: status ?? this.status,
         tempId: tempId,
+        kind: kind ?? this.kind,
+        voice: voice ?? this.voice,
       );
 
-  factory Message.fromJson(Map<String, dynamic> j) => Message(
-        id: (j['id'] as String?) ?? '',
-        conversationId: (j['conversationId'] as String?) ?? '',
-        senderId: (j['senderId'] as String?) ?? '',
-        body: (j['body'] as String?) ?? '',
-        createdAt: _parseTs(j['createdAt']) ?? DateTime.now(),
-      );
+  factory Message.fromJson(Map<String, dynamic> j) {
+    final voiceRaw = j['voice'];
+    final voice = voiceRaw is Map
+        ? VoicePayload.fromJson(voiceRaw.cast<String, dynamic>())
+        : null;
+    var kind = (j['kind'] as String?) ?? '';
+    if (kind.isEmpty) {
+      kind = voice != null ? 'voice' : 'text';
+    }
+    return Message(
+      id: (j['id'] as String?) ?? '',
+      conversationId: (j['conversationId'] as String?) ?? '',
+      senderId: (j['senderId'] as String?) ?? '',
+      body: (j['body'] as String?) ?? '',
+      createdAt: _parseTs(j['createdAt']) ?? DateTime.now(),
+      kind: kind,
+      voice: voice,
+    );
+  }
 }
 
 enum MessageStatus { pending, sent, read, failed }
+
+// Voice attachment payload riding on a Message. Foundation DTO mirrors the
+// wire shape the backend emits on ListMessages / WS message envelopes, and is
+// the same shape voice_bubble.VoicePayload was built against.
+class VoicePayload {
+  const VoicePayload({
+    required this.fileId,
+    required this.durationMs,
+    required this.peaks,
+    required this.played,
+  });
+
+  final String fileId;
+  final int durationMs;
+  final List<int> peaks;
+  final bool played;
+
+  VoicePayload copyWith({bool? played}) => VoicePayload(
+        fileId: fileId,
+        durationMs: durationMs,
+        peaks: peaks,
+        played: played ?? this.played,
+      );
+
+  factory VoicePayload.fromJson(Map<String, dynamic> j) {
+    final rawPeaks = j['peaks'];
+    final peaks = <int>[];
+    if (rawPeaks is List) {
+      for (final p in rawPeaks) {
+        if (p is int) {
+          peaks.add(p);
+        } else if (p is num) {
+          peaks.add(p.toInt());
+        } else if (p is String) {
+          final v = int.tryParse(p);
+          if (v != null) peaks.add(v);
+        }
+      }
+    }
+    return VoicePayload(
+      fileId: (j['fileId'] as String?) ?? (j['file_id'] as String?) ?? '',
+      durationMs: _intOr(j['durationMs'] ?? j['duration_ms'], 0),
+      peaks: peaks,
+      played: (j['played'] as bool?) ?? false,
+    );
+  }
+}
 
 class Conversation {
   Conversation({

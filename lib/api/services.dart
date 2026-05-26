@@ -61,6 +61,22 @@ class UsersApi {
         .toList();
   }
 
+  // Partial update — pass null to leave a field alone.
+  Future<User> updateProfile({
+    String? displayName,
+    String? handle,
+    String? bio,
+  }) async {
+    final body = <String, dynamic>{};
+    if (displayName != null) body['displayName'] = displayName;
+    if (handle != null) body['handle'] = handle;
+    if (bio != null) body['bio'] = bio;
+    final res = await _c.call('quick.v1.Users', 'UpdateProfile', body);
+    return User.fromJson(
+      (res['user'] as Map?)?.cast<String, dynamic>() ?? const {},
+    );
+  }
+
   Future<List<Presence>> getPresence(List<String> userIds) async {
     if (userIds.isEmpty) return const [];
     final res = await _c.call('quick.v1.Users', 'GetPresence', {
