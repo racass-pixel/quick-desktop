@@ -515,3 +515,19 @@ analog in `livekit_client` on Windows. Workarounds:
 The `startScreenShare()` methods carry a `TODO(calls-anti-echo)` and a
 desktop-source-picker UI is the right follow-up once a single agent owns the
 calls UX end-to-end.
+
+## 6. Voice playback Content-Type quirk
+
+`GET /v1/media/voice/{file_id}?token=...` serves the recorded blob. On the
+web client, the `<audio>` element relies on the server's `Content-Type`
+header to pick a decoder, and there is a known production case where the
+header is missing or set to `application/octet-stream`, leaving the browser
+unable to play it. On Windows, `just_audio` decodes through Media Foundation
+which sniffs the container instead and tolerates a missing header, so the
+desktop client typically plays voice blobs that fail in browsers.
+
+If a voice blob still refuses to play, the bubble surfaces an inline
+"Couldn't play" pill (red, MM:SS-adjacent) driven by an `errorMessageId`
+field on `VoicePlayerState`. The pill is the user-visible signal that the
+load/decode failed; the underlying error is forwarded onto
+`AudioPlayer.playbackEventStream`'s error channel.

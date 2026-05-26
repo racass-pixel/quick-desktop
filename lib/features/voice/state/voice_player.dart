@@ -25,6 +25,7 @@ class VoicePlayerState {
     this.positionMs = 0,
     this.durationMs = 0,
     this.speed = 1.0,
+    this.errorMessageId,
   });
 
   // null when nothing is loaded; the bubble keys off this to know which one
@@ -34,6 +35,10 @@ class VoicePlayerState {
   final int positionMs;
   final int durationMs;
   final double speed;
+  // When a load/play fails this is set to the messageId that failed, so the
+  // matching bubble can show an inline "Couldn't play" pill. Cleared on the
+  // next successful play.
+  final String? errorMessageId;
 
   VoicePlayerState copyWith({
     Object? currentMessageId = _sentinel,
@@ -41,6 +46,7 @@ class VoicePlayerState {
     int? positionMs,
     int? durationMs,
     double? speed,
+    Object? errorMessageId = _sentinel,
   }) {
     return VoicePlayerState(
       currentMessageId: identical(currentMessageId, _sentinel)
@@ -50,6 +56,9 @@ class VoicePlayerState {
       positionMs: positionMs ?? this.positionMs,
       durationMs: durationMs ?? this.durationMs,
       speed: speed ?? this.speed,
+      errorMessageId: identical(errorMessageId, _sentinel)
+          ? this.errorMessageId
+          : errorMessageId as String?,
     );
   }
 }
@@ -72,6 +81,20 @@ class VoicePlayerNotifier extends ChangeNotifier {
         notifyListeners();
       }
     });
+    // Surface decode/network failures so the bubble can render a "Couldn't
+    // play" pill. Without this just_audio errors only land on stderr and the
+    // user sees a dead play button.
+    _errSub = _player.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace _) {
+        final id = _state.currentMessageId;
+        _state = _state.copyWith(
+          isPlaying: false,
+          errorMessageId: id,
+        );
+        notifyListeners();
+      },
+    );
     _posSub = _player.positionStream.listen((d) {
       if (_state.currentMessageId == null) return;
       _state = _state.copyWith(positionMs: d.inMilliseconds);
@@ -88,6 +111,7 @@ class VoicePlayerNotifier extends ChangeNotifier {
   StreamSubscription<PlayerState>? _stateSub;
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration?>? _durSub;
+  StreamSubscription<PlaybackEvent>? _errSub;
 
   VoicePlayerState _state = const VoicePlayerState();
   VoicePlayerState get state => _state;
@@ -109,19 +133,35 @@ class VoicePlayerNotifier extends ChangeNotifier {
       );
       notifyListeners();
       try {
-        await _player.setUrl(url);
-        // setUrl resets playbackRate to 1.0 — re-apply the user's choice.
+        // AudioSource.uri lets us pin Content-Type expectations and pass a
+        // hint headers map if the backend ever serves voice without one. For
+        // now plain setUrl is sufficient on Windows (Media Foundation sniffs
+        // the container), but going via AudioSource also makes future header
+        // tweaks (Range, etc.) a one-line change.
+        await _player.setAudioSource(AudioSource.uri(Uri.parse(url)));
+        // setAudioSource resets playbackRate to 1.0 — re-apply the user's
+        // chosen speed.
         await _player.setSpeed(_state.speed);
       } catch (_) {
-        // Surface a failed load by clearing the current id so the bubble
-        // returns to its idle "press play" state. The caller already shows
-        // network-level errors at the composer; nothing more to do here.
-        _state = const VoicePlayerState();
+        // Surface a failed load by tagging the messageId so the bubble can
+        // render an inline "Couldn't play" pill.
+        _state = VoicePlayerState(
+          speed: _state.speed,
+          errorMessageId: messageId,
+        );
         notifyListeners();
         return;
       }
     }
-    await _player.play();
+    try {
+      await _player.play();
+    } catch (_) {
+      _state = _state.copyWith(
+        isPlaying: false,
+        errorMessageId: messageId,
+      );
+      notifyListeners();
+    }
   }
 
   Future<void> pause() async {
@@ -148,6 +188,7 @@ class VoicePlayerNotifier extends ChangeNotifier {
     await _stateSub?.cancel();
     await _posSub?.cancel();
     await _durSub?.cancel();
+    await _errSub?.cancel();
     await _player.dispose();
     super.dispose();
   }

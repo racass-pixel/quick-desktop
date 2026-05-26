@@ -158,6 +158,8 @@ class _VoiceBubbleState extends State<VoiceBubble> {
     final voice = widget.voice;
     final unread = !widget.isOwn && !voice.played;
     final speed = widget.player.state.speed;
+    final hasError =
+        widget.player.state.errorMessageId == widget.voice.messageId;
 
     return ConstrainedBox(
       constraints: const BoxConstraints(minWidth: 260),
@@ -177,6 +179,7 @@ class _VoiceBubbleState extends State<VoiceBubble> {
                   child: CustomPaint(
                     painter: _WaveformPainter(
                       peaks: voice.peaks,
+                      fileId: voice.fileId,
                       progress: _progress,
                       unread: unread,
                       playing: _isPlaying || _currentMs > 0,
@@ -224,6 +227,20 @@ class _VoiceBubbleState extends State<VoiceBubble> {
           ),
           const SizedBox(width: 8),
           _SpeedPill(speed: speed, onTap: _cycleSpeed),
+          if (hasError) ...[
+            const SizedBox(width: 6),
+            const Padding(
+              padding: EdgeInsets.only(top: 1),
+              child: Text(
+                "Couldn't play",
+                style: TextStyle(
+                  color: AppColors.err,
+                  fontSize: 11,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -297,9 +314,57 @@ class _SpeedPill extends StatelessWidget {
   }
 }
 
+// Tiny deterministic string hash (FNV-1a). Not cryptographic — only used to
+// keep the synthetic placeholder waveform stable per file id so re-renders
+// don't reshuffle bars.
+int _hashStr(String s) {
+  var h = 2166136261;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.codeUnitAt(i);
+    h = (h * 16777619) & 0xFFFFFFFF;
+  }
+  return h & 0x7FFFFFFF;
+}
+
+// Build a soft sine-envelope waveform seeded off [seed] so a missing /
+// all-zero peaks array still reads as "audio" instead of a flat line.
+// Values are 0..255 ints, matching the wire-peaks shape.
+List<int> _syntheticPeaks(String seed) {
+  final h = _hashStr(seed.isEmpty ? 'placeholder' : seed);
+  final out = List<int>.filled(_kBarCount, 0);
+  for (var i = 0; i < _kBarCount; i++) {
+    final t = i / (_kBarCount - 1);
+    // Sin envelope (0..1..0) gives a centred swell.
+    final env = (0.5 - 0.5 * _cos(t * 3.141592653589793 * 2));
+    final jitter = ((h * (i + 1)) % 31) / 31.0;
+    final v = 60.0 + env * 110.0 + jitter * 25.0;
+    final clamped = v.clamp(40, 220).round();
+    out[i] = clamped;
+  }
+  return out;
+}
+
+double _cos(double x) {
+  // Local cos avoids importing dart:math just for this — fast enough at 64
+  // taps per repaint and keeps the painter free of an extra import.
+  // Taylor falls apart past pi/2, so reduce into [-pi, pi] first.
+  const pi = 3.141592653589793;
+  var v = x;
+  while (v > pi) v -= 2 * pi;
+  while (v < -pi) v += 2 * pi;
+  final v2 = v * v;
+  // 8-term truncation — fine for visual amplitude.
+  return 1
+      - v2 / 2
+      + v2 * v2 / 24
+      - v2 * v2 * v2 / 720
+      + v2 * v2 * v2 * v2 / 40320;
+}
+
 class _WaveformPainter extends CustomPainter {
   _WaveformPainter({
     required this.peaks,
+    required this.fileId,
     required this.progress,
     required this.unread,
     required this.playing,
@@ -308,6 +373,9 @@ class _WaveformPainter extends CustomPainter {
   });
 
   final List<int> peaks;
+  // Seed for the synthetic placeholder when [peaks] is empty/all-zero. Using
+  // the fileId keeps the placeholder stable across rebuilds.
+  final String fileId;
   final double progress;
   final bool unread;
   final bool playing;
@@ -318,11 +386,20 @@ class _WaveformPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     // Pad/truncate the source array to exactly _kBarCount so a malformed
     // input doesn't blow up the layout (e.g. backend sends 63 due to a
-    // round-trip bug).
+    // round-trip bug). If peaks is empty OR all zero (silent recording,
+    // decode failure, legacy row from before peaks landed), substitute a
+    // synthetic envelope so the bubble looks like audio.
     final src = peaks;
-    final padded = List<int>.filled(_kBarCount, 0);
+    var padded = List<int>.filled(_kBarCount, 0);
     for (var i = 0; i < _kBarCount && i < src.length; i++) {
       padded[i] = src[i];
+    }
+    var maxP = 0;
+    for (final v in padded) {
+      if (v > maxP) maxP = v;
+    }
+    if (maxP <= 0) {
+      padded = _syntheticPeaks(fileId);
     }
 
     // Bar width + spacing: 2px bars on 4px stride (2px gap), centred so the
@@ -334,7 +411,7 @@ class _WaveformPainter extends CustomPainter {
     final grey = Paint()..color = AppColors.ink3.withValues(alpha: 0.6);
 
     for (var i = 0; i < _kBarCount; i++) {
-      final v = padded[i].clamp(0, 255) / 255.0;
+      final v = padded[i].clamp(0, 255).toDouble() / 255.0;
       final h = (v * _kMaxBar).clamp(_kMinBar, _kMaxBar).toDouble();
       final x = i * stride + (stride - barW) / 2;
       final y = (size.height - h) / 2;
@@ -365,6 +442,7 @@ class _WaveformPainter extends CustomPainter {
         old.playing != playing ||
         old.isOwn != isOwn ||
         old.played != played ||
+        old.fileId != fileId ||
         !identical(old.peaks, peaks);
   }
 }
