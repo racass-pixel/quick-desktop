@@ -22,6 +22,8 @@ dependencies:
   # Storage
   shared_preferences: ^2.3.4
   flutter_secure_storage: ^9.2.2
+  sqflite_common_ffi: ^2.3.3
+  cryptography: ^2.7.0
 
   # Utilities
   intl: ^0.20.1
