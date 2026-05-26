@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../api/connect.dart';
+import '../router.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
 
@@ -53,21 +54,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         context.push('/login-passkey?email=${Uri.encodeQueryComponent(email)}');
         return;
       }
-      final res = await ref.read(authApiProvider).signupWithPasskey(email);
+      final res = await ref
+          .read(authControllerProvider.notifier)
+          .signupWithPasskey(email);
       if (res.token.isEmpty || res.passkey.isEmpty) {
         setState(() => _error = 'Server returned an incomplete response.');
         return;
       }
-      // Persist the session immediately so a refresh would not strand the
-      // user — the passkey is still shown next, but the account is real.
-      await ref
-          .read(authControllerProvider.notifier)
-          .onVerified(res.token, res.user);
       if (!mounted) return;
+      // Pass the full result through extra so the reveal screen can flip the
+      // session into signedIn only after the user confirms they saved the
+      // passkey. This avoids any redirect race in the router.
       context.push(
-        '/passkey-reveal'
-        '?email=${Uri.encodeQueryComponent(email)}'
-        '&passkey=${Uri.encodeQueryComponent(res.passkey)}',
+        '/passkey-reveal',
+        extra: PasskeyRevealArgs(email: email, result: res),
       );
     } on ConnectError catch (e) {
       if (e.code == 'already_exists') {

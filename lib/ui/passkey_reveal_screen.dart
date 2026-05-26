@@ -1,6 +1,8 @@
-// One-time reveal of a freshly-minted passkey. Shown right after signup, with
-// the session already stored — leaving the screen without saving the passkey
-// means the user can still chat now but can't ever log back in.
+// One-time reveal of a freshly-minted passkey. Shown right after signup, BEFORE
+// the auth state flips to signedIn — that way the router's redirect can't race
+// past this screen. The session token and user came back from the server
+// already; we hold them locally and write them into auth state only when the
+// user has acknowledged they saved the passkey (then we navigate to /).
 //
 // We make the "saved it" affirmation explicit (a required checkbox) so the
 // Continue button can't be clicked through. Copy and download both shove the
@@ -11,28 +13,37 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../api/dto.dart';
+import '../state/providers.dart';
 import '../theme/theme.dart';
 
-class PasskeyRevealScreen extends StatefulWidget {
+class PasskeyRevealScreen extends ConsumerStatefulWidget {
   const PasskeyRevealScreen({
     super.key,
     required this.email,
-    required this.passkey,
+    required this.result,
   });
 
+  // Email is carried separately because the User record on the server response
+  // doesn't include it — the reveal copy mentions which account was created.
   final String email;
-  final String passkey;
+  final SignupWithPasskeyResult result;
+
+  String get passkey => result.passkey;
 
   @override
-  State<PasskeyRevealScreen> createState() => _PasskeyRevealScreenState();
+  ConsumerState<PasskeyRevealScreen> createState() =>
+      _PasskeyRevealScreenState();
 }
 
-class _PasskeyRevealScreenState extends State<PasskeyRevealScreen> {
+class _PasskeyRevealScreenState extends ConsumerState<PasskeyRevealScreen> {
   bool _acknowledged = false;
   bool _showCopied = false;
+  bool _finishing = false;
   String? _toast;
 
   // Insert middle dots between the 4-char groups for the on-screen rendering
@@ -87,6 +98,27 @@ class _PasskeyRevealScreenState extends State<PasskeyRevealScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _toast = 'Could not save file');
+    }
+  }
+
+  // Writes the session that the server already minted into the AuthController
+  // and navigates to the shell. We swallow non-network errors silently here —
+  // the worst case is the user has to enter their freshly-saved passkey on the
+  // login screen, which is fine.
+  Future<void> _finish() async {
+    setState(() => _finishing = true);
+    try {
+      await ref
+          .read(authControllerProvider.notifier)
+          .completeSignup(widget.result);
+      if (!mounted) return;
+      context.go('/');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _finishing = false;
+        _toast = 'Could not finish sign-in. Try again.';
+      });
     }
   }
 
@@ -217,41 +249,53 @@ class _PasskeyRevealScreenState extends State<PasskeyRevealScreen> {
                   ),
                 ],
                 const SizedBox(height: 22),
-                InkWell(
-                  onTap: () =>
-                      setState(() => _acknowledged = !_acknowledged),
+                Material(
+                  color: Colors.transparent,
                   borderRadius: BorderRadius.circular(AppRadii.rSm),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: Checkbox(
-                            value: _acknowledged,
-                            onChanged: (v) =>
-                                setState(() => _acknowledged = v ?? false),
-                            activeColor: AppColors.ember,
-                            side: const BorderSide(color: AppColors.ink3),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () =>
+                        setState(() => _acknowledged = !_acknowledged),
+                    borderRadius: BorderRadius.circular(AppRadii.rSm),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: Checkbox(
+                              value: _acknowledged,
+                              onChanged: (v) =>
+                                  setState(() => _acknowledged = v ?? false),
+                              activeColor: AppColors.ember,
+                              side: const BorderSide(color: AppColors.ink3),
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: Text(
-                            'I have saved my passkey',
-                            style: TextStyle(
-                                color: AppColors.ink1, fontSize: 13),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text(
+                              'I have saved my passkey',
+                              style: TextStyle(
+                                  color: AppColors.ink1, fontSize: 13),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
                 const SizedBox(height: 18),
                 ElevatedButton(
-                  onPressed: _acknowledged ? () => context.go('/') : null,
-                  child: const Text('Continue to Quick'),
+                  onPressed: (_acknowledged && !_finishing) ? _finish : null,
+                  child: _finishing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Text('Continue to Quick'),
                 ),
               ],
             ),

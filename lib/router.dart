@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'api/dto.dart';
 import 'features/settings/screens/settings_screen.dart';
 import 'state/providers.dart';
 import 'ui/chat_view.dart';
@@ -25,18 +26,18 @@ GoRouter buildRouter(WidgetRef ref) {
       final boot = ref.read(authControllerProvider).boot;
       final loc = state.matchedLocation;
       if (boot == BootState.booting) return null; // splash handles itself
-      // Routes safe for unauthenticated users.
+      // Routes safe for unauthenticated users. /passkey-reveal is shown right
+      // after signup but BEFORE auth state flips to signedIn — the reveal
+      // screen completes the signin once the user acknowledges the passkey.
       final isSignedOutAuthRoute = loc == '/login' ||
           loc.startsWith('/verify') ||
-          loc.startsWith('/login-passkey');
-      // /passkey-reveal is shown right after signup completes, i.e. while
-      // signedIn — exclude it from the "kick auth routes back to /" rule.
-      final isPostSignupReveal = loc.startsWith('/passkey-reveal');
+          loc.startsWith('/login-passkey') ||
+          loc.startsWith('/passkey-reveal');
       if (boot == BootState.signedOut) {
         return isSignedOutAuthRoute ? null : '/login';
       }
-      // signedIn
-      if (isSignedOutAuthRoute && !isPostSignupReveal) return '/';
+      // signedIn: bounce any signed-out-only auth routes back to the shell.
+      if (isSignedOutAuthRoute) return '/';
       return null;
     },
     routes: [
@@ -52,10 +53,17 @@ GoRouter buildRouter(WidgetRef ref) {
       ),
       GoRoute(
         path: '/passkey-reveal',
-        builder: (_, s) => PasskeyRevealScreen(
-          email: s.uri.queryParameters['email'] ?? '',
-          passkey: s.uri.queryParameters['passkey'] ?? '',
-        ),
+        builder: (_, s) {
+          final extra = s.extra;
+          if (extra is PasskeyRevealArgs) {
+            return PasskeyRevealScreen(
+              email: extra.email,
+              result: extra.result,
+            );
+          }
+          // No payload — someone deep-linked here. Bounce to login.
+          return const LoginScreen();
+        },
       ),
       // /verify is the legacy email-code fallback path. Kept registered so
       // existing deep links / muscle memory still resolve, but the primary
@@ -83,6 +91,15 @@ GoRouter buildRouter(WidgetRef ref) {
       ),
     ],
   );
+}
+
+// Argument bundle for /passkey-reveal. The User record on
+// SignupWithPasskeyResult doesn't carry the email the user typed, so we ferry
+// it alongside the rest of the signup payload via GoRouter's extra.
+class PasskeyRevealArgs {
+  const PasskeyRevealArgs({required this.email, required this.result});
+  final String email;
+  final SignupWithPasskeyResult result;
 }
 
 class _SettingsHost extends ConsumerWidget {
