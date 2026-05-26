@@ -3,6 +3,7 @@
 // the rest is bundled into an encrypted blob.
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -84,7 +85,7 @@ class UsersDao {
     final enc = r['enc_blob'];
     if (enc is List<int> && enc.isNotEmpty) {
       try {
-        blob = await _ldb.crypto.decryptJson(_toBytes(enc));
+        blob = await _ldb.crypto.decryptJson(Uint8List.fromList(enc));
       } catch (_) {/* tolerate corrupt row */}
     }
     final seenMs = r['presence_seen_at'] as int?;
@@ -99,10 +100,6 @@ class UsersDao {
     );
   }
 }
-
-// Bridge between List<int> we get from sqflite and Uint8List the crypto wants.
-List<int> _toBytes(List<int> v) =>
-    v is List<int> ? v : v.toList();
 
 // Local convenience for callers that want to peek at how this DAO would
 // serialise a user without writing one.

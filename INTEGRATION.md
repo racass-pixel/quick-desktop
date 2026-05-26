@@ -531,3 +531,88 @@ If a voice blob still refuses to play, the bubble surfaces an inline
 field on `VoicePlayerState`. The pill is the user-visible signal that the
 load/decode failed; the underlying error is forwarded onto
 `AudioPlayer.playbackEventStream`'s error channel.
+
+## tdata local store
+
+A Telegram-style on-disk encrypted cache backs the in-memory `ChatsController`
+so the sidebar and the active thread paint instantly on launch and stay usable
+when the network drops.
+
+### DB location
+
+`<app-support>/quick/tdata.db` where `<app-support>` is whatever
+`path_provider.getApplicationSupportDirectory()` returns. On Windows that
+resolves to `%APPDATA%\com.racasspixel\quick\quick` in practice. Two sidecar
+files (`tdata.db-wal`, `tdata.db-shm`) ride alongside in WAL mode. Cached
+voice/image blobs live in `<app-support>/quick/media/`.
+
+### Schema version
+
+`kSchemaVersion = 1` (see `lib/store/schema.dart`). All tables created in one
+DDL pass:
+
+- `users(id PK, handle, display_name, avatar_color, presence_seen_at, enc_blob)`
+- `chats(id PK, kind, last_message_at, last_message_id, unread_count, pinned_at, enc_blob)`
+- `chat_members(chat_id, user_id, role, joined_at, PRIMARY KEY(chat_id, user_id))`
+- `messages(id PK, chat_id, sender_id, created_at, kind, status, enc_body, enc_attachments)` + INDEX `(chat_id, created_at DESC)`
+- `media_cache(file_id PK, local_path, mime, size_bytes, cached_at)`
+- `outbox(local_id PK, chat_id, payload_json, created_at, attempt_count, last_error)` + INDEX `(chat_id, created_at ASC)`
+
+Future schema changes bump `kSchemaVersion` and add a branch to
+`migrate(db, fromVersion, toVersion)` in `schema.dart`. On a corrupt-file
+open, the DB is renamed `tdata.db.corrupt-<ms>` and a fresh one is created —
+the next sync rebuilds it from the server.
+
+### How to wipe (debugging)
+
+```dart
+import 'package:quick_desktop/store/local_store.dart';
+await LocalStore.wipe();
+```
+
+`wipe` closes the handle, deletes the DB file plus its WAL/SHM/journal
+sidecars. Equivalent to the on-disk effect of signing out. Or delete
+`tdata.db*` under `<app-support>/quick/` by hand.
+
+### How the encryption key is derived
+
+`lib/store/crypto.dart#StoreCrypto.fromSessionToken(sessionToken)`:
+
+1. Take the session token bytes (UTF-8) as input key material.
+2. Run HKDF-SHA256 with the constant 32-byte pepper
+   `quick.tdata.v1.pepper.do-not-change-without-bumping-schema` as salt and
+   `quick.tdata.aes-gcm` as info to derive a 32-byte AES-256 key.
+3. Each row's `enc_*` column is `nonce(12) || ciphertext || mac(16)` from
+   `AesGcm.with256bits()`. A fresh nonce per row.
+
+Switching accounts produces a different session token, so the derived key
+differs and old rows fail to decrypt. The `onVerified` path defensively wipes
+before opening to avoid leaving orphaned rows on disk.
+
+The E2E crypto agent's `lib/crypto/` does not exist at the time of writing.
+When it lands, swap `StoreCrypto.fromSessionToken` to call into the shared
+primitives — the on-disk blob format is stable and won't need a schema bump
+as long as nonce+ciphertext+mac stays at 12+N+16.
+
+### Sync algorithm (local-first + delta from server)
+
+Boot:
+1. `AuthController.bootstrap()` reads the persisted session token.
+2. `LocalStore.boot(token)` opens the DB and derives the crypto key.
+3. `ChatsController` constructor kicks `_hydrateFromStore()` which reads the
+   `chats` table and seeds `state.byId` — sidebar paints from disk.
+4. `loadConversations()` then calls `ListConversations` and overwrites
+   `state.byId` + persists the fresh list (write-through). Network failure
+   leaves the disk-hydrated state in place.
+
+Per-thread:
+1. `loadMessages(convId)` first reads the latest 50 messages from
+   `messages_dao.listLatest(convId)` and surfaces them via `state.messages`.
+2. It then calls `ListMessages` with `afterId = <newest cached message id>`
+   (when available) so the server only sends the gap since last sync.
+3. Returned rows are merged, deduped on id, and persisted.
+4. WS `message` envelopes write through to disk immediately
+   (`applyMessage` → `messages.upsert`).
+
+On logout the secure-storage token is cleared AND `LocalStore.wipe()` deletes
+the DB so the next sign-in starts fresh.

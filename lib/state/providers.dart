@@ -19,6 +19,7 @@ import '../features/settings/api/users_api.dart';
 import '../features/voice/api/voice_api.dart';
 import '../features/voice/state/voice_player.dart';
 import '../services/updater.dart';
+import '../store/local_store.dart';
 import 'chats_controller.dart';
 
 const apiBaseUrl = 'https://api.quick-network.vu';
@@ -67,6 +68,11 @@ class AuthController extends StateNotifier<AuthState> {
       return;
     }
     _ref.read(connectClientProvider).setToken(token);
+    // Open the tdata local store before anything reads from it. Failure is
+    // non-fatal — the controller falls back to network-only.
+    try {
+      await LocalStore.boot(token);
+    } catch (_) {/* swallow */}
     try {
       final me = await _ref.read(usersApiProvider).me();
       state = AuthState(boot: BootState.signedIn, user: me);
@@ -118,6 +124,15 @@ class AuthController extends StateNotifier<AuthState> {
   Future<void> onVerified(String token, User user) async {
     await _ref.read(sessionStoreProvider).writeToken(token);
     _ref.read(connectClientProvider).setToken(token);
+    // Fresh sign-in / sign-up — wipe any leftover store before opening so
+    // an account switch on the same device doesn't carry rows the new key
+    // can't decrypt anyway.
+    try {
+      await LocalStore.wipe();
+    } catch (_) {/* ignore */}
+    try {
+      await LocalStore.boot(token);
+    } catch (_) {/* swallow */}
     state = AuthState(boot: BootState.signedIn, user: user);
     _ref.read(realtimeProvider).connect(token);
     _ref.read(callsWsBridgeProvider);
@@ -140,6 +155,10 @@ class AuthController extends StateNotifier<AuthState> {
     await _ref.read(sessionStoreProvider).clear();
     _ref.read(connectClientProvider).setToken(null);
     _ref.read(realtimeProvider).disconnect();
+    // Best-effort wipe of the local store on explicit sign-out.
+    try {
+      await LocalStore.wipe();
+    } catch (_) {/* ignore */}
     state = AuthState(boot: BootState.signedOut);
   }
 }

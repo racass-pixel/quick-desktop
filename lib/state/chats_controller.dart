@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/dto.dart';
 import '../api/realtime.dart';
 import '../api/services.dart';
+import '../store/local_store.dart';
 import 'providers.dart' show messagingApiProvider, realtimeProvider, authControllerProvider;
 
 class ChatsState {
@@ -59,6 +60,10 @@ class ChatsState {
 class ChatsController extends StateNotifier<ChatsState> {
   ChatsController(this._ref) : super(ChatsState()) {
     _wsSub = _ref.read(realtimeProvider).envelopes.listen(_onEnvelope);
+    // Hydrate from the local store on creation so the first paint reflects
+    // cached chats even before ListConversations responds.
+    // ignore: discarded_futures
+    _hydrateFromStore();
   }
 
   final Ref _ref;
@@ -72,6 +77,19 @@ class ChatsController extends StateNotifier<ChatsState> {
     super.dispose();
   }
 
+  Future<void> _hydrateFromStore() async {
+    final store = LocalStore.instanceOrNull;
+    if (store == null) return;
+    try {
+      final cached = await store.hydrateConvs();
+      if (cached.isEmpty || !mounted) return;
+      // Don't clobber whatever may have already arrived from the network.
+      if (state.byId.isNotEmpty) return;
+      final byId = <String, Conversation>{for (final c in cached) c.id: c};
+      state = state.copyWith(byId: byId, order: _reorder(byId));
+    } catch (_) {/* ignore */}
+  }
+
   Future<void> loadConversations() async {
     state = state.copyWith(loadingConvs: true);
     try {
@@ -82,7 +100,14 @@ class ChatsController extends StateNotifier<ChatsState> {
         order: _reorder(byId),
         loadingConvs: false,
       );
+      // Write-through: persist the server-authoritative list.
+      final store = LocalStore.instanceOrNull;
+      if (store != null) {
+        // ignore: discarded_futures
+        store.persistConvs(convs);
+      }
     } catch (_) {
+      // Network down — keep showing what we hydrated from disk.
       state = state.copyWith(loadingConvs: false);
     }
   }
@@ -96,10 +121,42 @@ class ChatsController extends StateNotifier<ChatsState> {
     state = state.copyWith(
       loadingMessages: {...state.loadingMessages, convId: true},
     );
+
+    // Read-through: surface cached messages first so the thread paints
+    // instantly while the network request races.
+    final store = LocalStore.instanceOrNull;
+    if (store != null && (before == null || before.isEmpty)) {
+      final existing = state.messages[convId] ?? const <Message>[];
+      if (existing.isEmpty) {
+        try {
+          final cached = await store.hydrateMessages(convId, limit: limit);
+          if (cached.isNotEmpty && mounted) {
+            state = state.copyWith(
+              messages: {...state.messages, convId: cached},
+            );
+          }
+        } catch (_) {/* ignore */}
+      }
+    }
+
     try {
+      // Delta fetch: when we have a cached newest message, ask the server only
+      // for anything strictly after it. Falls back to a full page when we have
+      // nothing local.
+      String? afterId;
+      if (store != null && (before == null || before.isEmpty)) {
+        final newest = await store.latestForChat(convId);
+        if (newest != null && newest.id.isNotEmpty) {
+          // Skip the delta fetch for now if we already have cached data —
+          // a backfill is correct but the wire shape for afterId is small.
+          afterId = newest.id;
+        }
+      }
+
       final res = await _api.listMessages(
         convId,
         beforeId: before,
+        afterId: afterId,
         limit: limit,
       );
       // Server returns newest-first; reverse for display.
@@ -109,6 +166,9 @@ class ChatsController extends StateNotifier<ChatsState> {
       if (before != null && before.isNotEmpty) {
         final ids = existing.map((m) => m.id).toSet();
         merged = [...fresh.where((m) => !ids.contains(m.id)), ...existing];
+      } else if (afterId != null) {
+        final ids = existing.map((m) => m.id).toSet();
+        merged = [...existing, ...fresh.where((m) => !ids.contains(m.id))];
       } else {
         merged = fresh;
       }
@@ -116,6 +176,13 @@ class ChatsController extends StateNotifier<ChatsState> {
         messages: {...state.messages, convId: merged},
         hasMore: {...state.hasMore, convId: res.hasMore},
       );
+      // Write-through: persist the freshly-arrived rows.
+      if (store != null && fresh.isNotEmpty) {
+        // ignore: discarded_futures
+        store.persistMessages(fresh);
+      }
+    } catch (_) {
+      // Network failure — keep whatever was hydrated from disk.
     } finally {
       final next = {...state.loadingMessages}..remove(convId);
       state = state.copyWith(loadingMessages: next);
@@ -134,6 +201,11 @@ class ChatsController extends StateNotifier<ChatsState> {
     final conv = await _api.openDM(peerUserId);
     final byId = {...state.byId, conv.id: conv};
     state = state.copyWith(byId: byId, order: _reorder(byId));
+    final store = LocalStore.instanceOrNull;
+    if (store != null) {
+      // ignore: discarded_futures
+      store.persistConv(conv);
+    }
     return conv;
   }
 
@@ -158,6 +230,11 @@ class ChatsController extends StateNotifier<ChatsState> {
     try {
       final real = await _api.sendMessage(convId, trimmed);
       _swapPendingWithReal(convId, tempId, real);
+      final store = LocalStore.instanceOrNull;
+      if (store != null) {
+        // ignore: discarded_futures
+        store.persistMessage(real);
+      }
     } catch (_) {
       _markFailed(convId, tempId);
     }
@@ -254,6 +331,11 @@ class ChatsController extends StateNotifier<ChatsState> {
       messages: {...state.messages, convId: [...existing, msg]},
     );
     _updateConvPreview(convId, msg, isOwn: isOwn);
+    final store = LocalStore.instanceOrNull;
+    if (store != null) {
+      // ignore: discarded_futures
+      store.persistMessage(msg);
+    }
   }
 
   void _applyRead(WsEnvelope env) {
