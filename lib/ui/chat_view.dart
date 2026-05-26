@@ -1,13 +1,20 @@
 // Chat view: top bar with peer name, scrollable message list with day
-// separators, ticks for own messages, bottom text composer. Loads the page on
-// mount; older pages are fetched as the user scrolls to the top.
+// separators, ticks for own messages, bottom text composer with voice toggle.
+// Loads the page on mount; older pages are fetched as the user scrolls to the
+// top.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../api/dto.dart';
+import '../features/calls/screens/group_call_banner.dart';
+import '../features/calls/state/call_state.dart';
+import '../features/voice/widgets/voice_bubble.dart' as vw;
+import '../features/voice/widgets/voice_recorder_button.dart';
+import '../features/settings/widgets/profile_modal.dart';
 import '../state/chats_controller.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
@@ -25,12 +32,19 @@ class _ChatViewState extends ConsumerState<ChatView> {
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
   bool _loadingOlder = false;
+  // Debounce per-id so a re-render mid-play doesn't fire MarkPlayed twice.
+  final Set<String> _firedPlay = <String>{};
+  // Tracks whether the composer has any text — drives the voice/send toggle.
+  bool _hasText = false;
+  // Inline 3-second error pill in the composer for voice flow failures.
+  String? _voiceError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
     _scroll.addListener(_onScroll);
+    _composer.addListener(_onComposerChanged);
   }
 
   @override
@@ -44,10 +58,18 @@ class _ChatViewState extends ConsumerState<ChatView> {
   @override
   void dispose() {
     _scroll.removeListener(_onScroll);
+    _composer.removeListener(_onComposerChanged);
     _scroll.dispose();
     _composer.dispose();
     _composerFocus.dispose();
     super.dispose();
+  }
+
+  void _onComposerChanged() {
+    final has = _composer.text.trim().isNotEmpty;
+    if (has != _hasText) {
+      setState(() => _hasText = has);
+    }
   }
 
   void _bootstrap() {
@@ -104,6 +126,46 @@ class _ChatViewState extends ConsumerState<ChatView> {
         .send(widget.conversationId, text);
   }
 
+  void _showVoiceError(String msg) {
+    setState(() => _voiceError = msg);
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      if (_voiceError == msg) setState(() => _voiceError = null);
+    });
+  }
+
+  void _openPeerProfile(Conversation conv) {
+    final peer = conv.peer;
+    if (peer == null) return;
+    final usersApi = ref.read(settingsUsersApiProvider);
+    final me = ref.read(authControllerProvider).user;
+    showProfileModal(
+      context,
+      peer,
+      usersApi: usersApi,
+      isSelf: me != null && me.id == peer.id,
+      onMessage: (u) async {
+        final c = await ref.read(chatsControllerProvider.notifier).openDM(u.id);
+        if (!mounted) return;
+        Navigator.of(context).maybePop();
+        if (c.id.isNotEmpty && mounted) {
+          GoRouter.of(context).go('/chats/${c.id}');
+        }
+      },
+      onCall: (u) async {
+        final notifier = ref.read(callNotifierProvider);
+        await notifier.startCall(
+          CallPeer(
+            id: u.id,
+            displayName: u.displayName,
+            handle: u.handle,
+            avatarColor: u.avatarColor,
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(chatsControllerProvider);
@@ -124,10 +186,20 @@ class _ChatViewState extends ConsumerState<ChatView> {
     // Build a flat item list with day separators interleaved. We render the
     // ListView reversed so the newest messages stay anchored to the bottom.
     final items = _withDaySeparators(messages);
+    final isGroup = conv.type == 'group' || conv.type == 'channel';
+    final groupNotifier = ref.watch(groupCallNotifierProvider);
+    final voiceApi = ref.read(voiceApiProvider);
+    final voicePlayer = ref.watch(voicePlayerProvider);
+    final connect = ref.read(connectClientProvider);
 
     return Column(
       children: [
-        _TopBar(conv: conv),
+        _TopBar(conv: conv, onPeerTap: () => _openPeerProfile(conv)),
+        if (isGroup)
+          GroupCallBanner(
+            conversationId: widget.conversationId,
+            group: groupNotifier,
+          ),
         Expanded(
           child: messages.isEmpty
               ? const Center(
@@ -159,6 +231,21 @@ class _ChatViewState extends ConsumerState<ChatView> {
                     if (item is _DaySep) return _DaySeparator(day: item.day);
                     final m = item as Message;
                     final isMine = me != null && m.senderId == me.id;
+                    if (m.kind == 'voice' && m.voice != null) {
+                      return _VoiceBubbleRow(
+                        message: m,
+                        isMine: isMine,
+                        token: connect.token ?? '',
+                        playbackUrl: voiceApi.buildPlaybackUrl(
+                            m.voice!.fileId, connect.token ?? ''),
+                        player: voicePlayer,
+                        onFirstPlay: () {
+                          if (!_firedPlay.add(m.id)) return;
+                          // ignore: discarded_futures
+                          voiceApi.markPlayed(m.id);
+                        },
+                      );
+                    }
                     return _Bubble(message: m, isMine: isMine);
                   },
                 ),
@@ -167,6 +254,30 @@ class _ChatViewState extends ConsumerState<ChatView> {
           controller: _composer,
           focusNode: _composerFocus,
           onSend: _send,
+          showVoice: !_hasText,
+          conversationId: widget.conversationId,
+          voiceError: _voiceError,
+          onLocalVoice: (payload) {
+            ref
+                .read(chatsControllerProvider.notifier)
+                .appendOptimisticVoice(
+                  widget.conversationId,
+                  payload.fileId,
+                  payload.durationMs,
+                  payload.peaks,
+                );
+          },
+          onVoiceSent: (result) {
+            ref
+                .read(chatsControllerProvider.notifier)
+                .replaceOptimisticVoice(
+                  widget.conversationId,
+                  result.payload.fileId,
+                  result.serverMessageId,
+                  result.serverCreatedAt,
+                );
+          },
+          onVoiceError: _showVoiceError,
         ),
       ],
     );
@@ -229,11 +340,13 @@ class _DaySeparator extends StatelessWidget {
   }
 }
 
-class _TopBar extends StatelessWidget {
-  const _TopBar({required this.conv});
+class _TopBar extends ConsumerWidget {
+  const _TopBar({required this.conv, required this.onPeerTap});
   final Conversation conv;
+  final VoidCallback onPeerTap;
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isDm = conv.peer != null;
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -243,28 +356,65 @@ class _TopBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Avatar(name: conv.avatarSeed(), colorHex: conv.avatarColorHex(), size: 34),
+          GestureDetector(
+            onTap: isDm ? onPeerTap : null,
+            child: Avatar(
+                name: conv.avatarSeed(),
+                colorHex: conv.avatarColorHex(),
+                size: 34),
+          ),
           const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  conv.displayTitle(),
-                  style: const TextStyle(
-                    color: AppColors.ink1,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
+            child: GestureDetector(
+              onTap: isDm ? onPeerTap : null,
+              behavior: HitTestBehavior.opaque,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    conv.displayTitle(),
+                    style: const TextStyle(
+                      color: AppColors.ink1,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                    ),
                   ),
-                ),
-                Text(
-                  conv.peer != null ? '@${conv.peer!.handle}' : conv.type,
-                  style: const TextStyle(color: AppColors.ink3, fontSize: 11),
-                ),
-              ],
+                  Text(
+                    conv.peer != null ? '@${conv.peer!.handle}' : conv.type,
+                    style: const TextStyle(color: AppColors.ink3, fontSize: 11),
+                  ),
+                ],
+              ),
             ),
           ),
+          if (isDm)
+            IconButton(
+              tooltip: 'Call',
+              icon: const Icon(Icons.call, size: 18, color: AppColors.ink2),
+              onPressed: () {
+                final peer = conv.peer!;
+                final notifier = ref.read(callNotifierProvider);
+                // ignore: discarded_futures
+                notifier.startCall(CallPeer(
+                  id: peer.id,
+                  displayName: peer.displayName,
+                  handle: peer.handle,
+                  avatarColor: peer.avatarColor,
+                ));
+              },
+            ),
+          if (conv.type == 'group' || conv.type == 'channel')
+            IconButton(
+              tooltip: 'Voice chat',
+              icon:
+                  const Icon(Icons.graphic_eq, size: 18, color: AppColors.ink2),
+              onPressed: () {
+                final n = ref.read(groupCallNotifierProvider);
+                // ignore: discarded_futures
+                n.startGroupCall(conv.id);
+              },
+            ),
         ],
       ),
     );
@@ -338,6 +488,90 @@ class _Bubble extends StatelessWidget {
   }
 }
 
+class _VoiceBubbleRow extends StatelessWidget {
+  const _VoiceBubbleRow({
+    required this.message,
+    required this.isMine,
+    required this.token,
+    required this.playbackUrl,
+    required this.player,
+    required this.onFirstPlay,
+  });
+  final Message message;
+  final bool isMine;
+  final String token;
+  final String playbackUrl;
+  final dynamic player;
+  final VoidCallback onFirstPlay;
+
+  @override
+  Widget build(BuildContext context) {
+    final align = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final bg = isMine ? AppColors.ember.withAlpha(40) : AppColors.raised;
+    final border = isMine ? AppColors.ember.withAlpha(70) : AppColors.line;
+    final v = message.voice!;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: align,
+        children: [
+          Container(
+            constraints: const BoxConstraints(maxWidth: 520),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            decoration: BoxDecoration(
+              color: bg,
+              border: Border.all(color: border),
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(AppRadii.rLg),
+                topRight: const Radius.circular(AppRadii.rLg),
+                bottomLeft: Radius.circular(
+                    isMine ? AppRadii.rLg : AppRadii.rSm),
+                bottomRight: Radius.circular(
+                    isMine ? AppRadii.rSm : AppRadii.rLg),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                vw.VoiceBubble(
+                  voice: vw.VoicePayload(
+                    fileId: v.fileId,
+                    url: playbackUrl,
+                    durationMs: v.durationMs,
+                    peaks: v.peaks,
+                    played: v.played,
+                    messageId:
+                        message.id.isNotEmpty ? message.id : (message.tempId ?? v.fileId),
+                  ),
+                  isOwn: isMine,
+                  player: player,
+                  onFirstPlay: onFirstPlay,
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      DateFormat.Hm().format(message.createdAt),
+                      style: const TextStyle(
+                          color: AppColors.ink3, fontSize: 10.5),
+                    ),
+                    if (isMine) ...[
+                      const SizedBox(width: 4),
+                      _StatusIcon(status: message.status),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _StatusIcon extends StatelessWidget {
   const _StatusIcon({required this.status});
   final MessageStatus status;
@@ -356,65 +590,112 @@ class _StatusIcon extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends ConsumerWidget {
   const _Composer({
     required this.controller,
     required this.focusNode,
     required this.onSend,
+    required this.showVoice,
+    required this.conversationId,
+    required this.voiceError,
+    required this.onLocalVoice,
+    required this.onVoiceSent,
+    required this.onVoiceError,
   });
   final TextEditingController controller;
   final FocusNode focusNode;
   final VoidCallback onSend;
+  final bool showVoice;
+  final String conversationId;
+  final String? voiceError;
+  final void Function(vw.VoicePayload payload) onLocalVoice;
+  final void Function(VoiceSendResult result) onVoiceSent;
+  final void Function(String msg) onVoiceError;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final voiceApi = ref.read(voiceApiProvider);
+    final token = ref.read(connectClientProvider).token ?? '';
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
       decoration: const BoxDecoration(
         color: AppColors.panel,
         border: Border(top: BorderSide(color: AppColors.line)),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: Shortcuts(
-              shortcuts: const {
-                SingleActivator(LogicalKeyboardKey.enter): _SendIntent(),
-              },
-              child: Actions(
-                actions: {
-                  _SendIntent: CallbackAction<_SendIntent>(
-                    onInvoke: (_) {
-                      onSend();
-                      return null;
-                    },
-                  ),
-                },
-                child: TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  minLines: 1,
-                  maxLines: 6,
-                  textInputAction: TextInputAction.newline,
-                  decoration: const InputDecoration(
-                    hintText: 'Message',
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  ),
+          if (voiceError != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.err.withAlpha(40),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.err.withAlpha(120)),
+                ),
+                child: Text(
+                  voiceError!,
+                  style: const TextStyle(color: AppColors.ink1, fontSize: 12),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 10),
-          ElevatedButton(
-            onPressed: onSend,
-            style: ElevatedButton.styleFrom(
-              shape: const CircleBorder(),
-              padding: const EdgeInsets.all(14),
-            ),
-            child: const Icon(Icons.send, color: Colors.white, size: 18),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Shortcuts(
+                  shortcuts: const {
+                    SingleActivator(LogicalKeyboardKey.enter): _SendIntent(),
+                  },
+                  child: Actions(
+                    actions: {
+                      _SendIntent: CallbackAction<_SendIntent>(
+                        onInvoke: (_) {
+                          onSend();
+                          return null;
+                        },
+                      ),
+                    },
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      minLines: 1,
+                      maxLines: 6,
+                      textInputAction: TextInputAction.newline,
+                      decoration: const InputDecoration(
+                        hintText: 'Message',
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 12),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (showVoice)
+                VoiceRecorderButton(
+                  api: voiceApi,
+                  conversationId: conversationId,
+                  token: token,
+                  onLocalVoiceMessage: onLocalVoice,
+                  onSent: onVoiceSent,
+                  onError: onVoiceError,
+                )
+              else
+                ElevatedButton(
+                  onPressed: onSend,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: const EdgeInsets.all(14),
+                  ),
+                  child:
+                      const Icon(Icons.send, color: Colors.white, size: 18),
+                ),
+            ],
           ),
         ],
       ),

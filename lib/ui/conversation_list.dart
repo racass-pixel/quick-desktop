@@ -6,6 +6,8 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../api/dto.dart';
+import '../features/calls/state/call_state.dart';
+import '../features/settings/widgets/profile_modal.dart';
 import '../state/chats_controller.dart';
 import '../state/providers.dart';
 import '../theme/theme.dart';
@@ -111,6 +113,40 @@ class _ConversationListPaneState extends ConsumerState<ConversationListPane> {
                             conv: conv,
                             active: active,
                             onTap: () => context.go('/chats/$id'),
+                            onAvatarTap: () {
+                              final peer = conv.peer;
+                              if (peer == null) return;
+                              final me =
+                                  ref.read(authControllerProvider).user;
+                              showProfileModal(
+                                context,
+                                peer,
+                                usersApi:
+                                    ref.read(settingsUsersApiProvider),
+                                isSelf: me != null && me.id == peer.id,
+                                onMessage: (u) async {
+                                  final c = await ref
+                                      .read(chatsControllerProvider.notifier)
+                                      .openDM(u.id);
+                                  if (!context.mounted) return;
+                                  Navigator.of(context).maybePop();
+                                  if (c.id.isNotEmpty &&
+                                      context.mounted) {
+                                    context.go('/chats/${c.id}');
+                                  }
+                                },
+                                onCall: (u) async {
+                                  await ref
+                                      .read(callNotifierProvider)
+                                      .startCall(CallPeer(
+                                        id: u.id,
+                                        displayName: u.displayName,
+                                        handle: u.handle,
+                                        avatarColor: u.avatarColor,
+                                      ));
+                                },
+                              );
+                            },
                           );
                         },
                       ),
@@ -212,10 +248,12 @@ class _ConversationTile extends StatelessWidget {
     required this.conv,
     required this.active,
     required this.onTap,
+    required this.onAvatarTap,
   });
   final Conversation conv;
   final bool active;
   final VoidCallback onTap;
+  final VoidCallback onAvatarTap;
 
   String _relative(DateTime? t) {
     if (t == null) return '';
@@ -244,7 +282,13 @@ class _ConversationTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             children: [
-              Avatar(name: conv.avatarSeed(), colorHex: conv.avatarColorHex(), size: 44),
+              GestureDetector(
+                onTap: onAvatarTap,
+                child: Avatar(
+                    name: conv.avatarSeed(),
+                    colorHex: conv.avatarColorHex(),
+                    size: 44),
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
