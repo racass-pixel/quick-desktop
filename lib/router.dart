@@ -9,8 +9,10 @@ import 'features/settings/screens/settings_screen.dart';
 import 'state/providers.dart';
 import 'ui/chat_view.dart';
 import 'ui/empty_chat.dart';
+import 'ui/login_passkey_screen.dart';
 import 'ui/login_screen.dart';
 import 'ui/main_shell.dart';
+import 'ui/passkey_reveal_screen.dart';
 import 'ui/verify_screen.dart';
 
 GoRouter buildRouter(WidgetRef ref) {
@@ -23,12 +25,18 @@ GoRouter buildRouter(WidgetRef ref) {
       final boot = ref.read(authControllerProvider).boot;
       final loc = state.matchedLocation;
       if (boot == BootState.booting) return null; // splash handles itself
-      final isAuthRoute = loc == '/login' || loc.startsWith('/verify');
+      // Routes safe for unauthenticated users.
+      final isSignedOutAuthRoute = loc == '/login' ||
+          loc.startsWith('/verify') ||
+          loc.startsWith('/login-passkey');
+      // /passkey-reveal is shown right after signup completes, i.e. while
+      // signedIn — exclude it from the "kick auth routes back to /" rule.
+      final isPostSignupReveal = loc.startsWith('/passkey-reveal');
       if (boot == BootState.signedOut) {
-        return isAuthRoute ? null : '/login';
+        return isSignedOutAuthRoute ? null : '/login';
       }
       // signedIn
-      if (isAuthRoute) return '/';
+      if (isSignedOutAuthRoute && !isPostSignupReveal) return '/';
       return null;
     },
     routes: [
@@ -36,6 +44,22 @@ GoRouter buildRouter(WidgetRef ref) {
         path: '/login',
         builder: (_, __) => const LoginScreen(),
       ),
+      GoRoute(
+        path: '/login-passkey',
+        builder: (_, s) => LoginPasskeyScreen(
+          email: s.uri.queryParameters['email'] ?? '',
+        ),
+      ),
+      GoRoute(
+        path: '/passkey-reveal',
+        builder: (_, s) => PasskeyRevealScreen(
+          email: s.uri.queryParameters['email'] ?? '',
+          passkey: s.uri.queryParameters['passkey'] ?? '',
+        ),
+      ),
+      // /verify is the legacy email-code fallback path. Kept registered so
+      // existing deep links / muscle memory still resolve, but the primary
+      // entry from /login is now the passkey flow.
       GoRoute(
         path: '/verify',
         builder: (_, s) => VerifyScreen(email: s.uri.queryParameters['email'] ?? ''),

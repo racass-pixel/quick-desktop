@@ -90,6 +90,25 @@ class AuthController extends StateNotifier<AuthState> {
     }
   }
 
+  // Convenience used by the passkey signup screen. Calls the new
+  // SignupWithPasskey RPC, persists the resulting session immediately so the
+  // user is logged in even if they navigate away before saving the passkey,
+  // and returns the raw passkey for the reveal screen to display once.
+  Future<({String passkey, String email})> startSignup(String email) async {
+    final res = await _ref.read(authApiProvider).signupWithPasskey(email);
+    await onVerified(res.token, res.user);
+    return (passkey: res.passkey, email: email);
+  }
+
+  // Convenience used by the passkey login screen — same shape as onVerified
+  // but bound to the LoginWithPasskey RPC so the screens don't need to know
+  // about the AuthApi.
+  Future<void> startLogin(String email, String passkey) async {
+    final res =
+        await _ref.read(authApiProvider).loginWithPasskey(email, passkey);
+    await onVerified(res.token, res.user);
+  }
+
   Future<void> onVerified(String token, User user) async {
     await _ref.read(sessionStoreProvider).writeToken(token);
     _ref.read(connectClientProvider).setToken(token);
