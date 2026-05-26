@@ -36,6 +36,44 @@ class AuthApi {
   Future<void> logout() async {
     await _c.call('quick.v1.Auth', 'Logout', const {});
   }
+
+  // Creates a brand-new account in one round-trip and returns the freshly-
+  // generated passkey alongside the session. Surfaces ConnectError with code
+  // 'already_exists' when the email is already registered — the caller is
+  // expected to branch into the login flow on that error.
+  Future<SignupWithPasskeyResult> signupWithPasskey(String email) async {
+    final res = await _c.call('quick.v1.Auth', 'SignupWithPasskey', {
+      'email': email,
+    });
+    return SignupWithPasskeyResult(
+      token: (res['sessionToken'] as String?) ??
+          (res['session_token'] as String?) ??
+          (res['token'] as String?) ??
+          '',
+      user: User.fromJson(
+          (res['user'] as Map?)?.cast<String, dynamic>() ?? const {}),
+      passkey: (res['passkey'] as String?) ?? '',
+    );
+  }
+
+  // Exchanges a known email + passkey pair for a session. Surfaces
+  // ConnectError with code 'unauthenticated' for both unknown email and bad
+  // passkey — kept indistinguishable to avoid email-enumeration.
+  Future<LoginWithPasskeyResult> loginWithPasskey(
+      String email, String passkey) async {
+    final res = await _c.call('quick.v1.Auth', 'LoginWithPasskey', {
+      'email': email,
+      'passkey': passkey,
+    });
+    return LoginWithPasskeyResult(
+      token: (res['sessionToken'] as String?) ??
+          (res['session_token'] as String?) ??
+          (res['token'] as String?) ??
+          '',
+      user: User.fromJson(
+          (res['user'] as Map?)?.cast<String, dynamic>() ?? const {}),
+    );
+  }
 }
 
 class UsersApi {

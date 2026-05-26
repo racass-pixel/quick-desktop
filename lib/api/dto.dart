@@ -238,6 +238,28 @@ class Conversation {
       );
 }
 
+// Auth result envelopes for the passkey flow. Hand-written so the UI doesn't
+// depend on the proto generator and so we can grow optional fields server-side
+// without breaking the call sites.
+class SignupWithPasskeyResult {
+  const SignupWithPasskeyResult({
+    required this.token,
+    required this.user,
+    required this.passkey,
+  });
+
+  final String token;
+  final User user;
+  final String passkey;
+}
+
+class LoginWithPasskeyResult {
+  const LoginWithPasskeyResult({required this.token, required this.user});
+
+  final String token;
+  final User user;
+}
+
 // Proto3 JSON encodes Timestamp as an RFC3339 string (e.g. "2026-05-26T04:07:20Z").
 // Some clients also emit `{seconds, nanos}` objects; tolerate both.
 DateTime? _parseTs(dynamic v) {
