@@ -16,6 +16,7 @@ import '../../../theme/theme.dart';
 import '../state/call_state.dart';
 import '../state/group_call_state.dart';
 import '../widgets/participant_tile.dart';
+import '../widgets/screen_share_picker.dart';
 
 class CallScreen extends StatelessWidget {
   const CallScreen({
@@ -45,6 +46,12 @@ class CallScreen extends StatelessWidget {
         } else {
           tiles.addAll(_buildDirectTiles(call));
         }
+        final screenShareCfg = inGroup
+            ? group.screenShareConfig
+            : call.screenShareConfig;
+        final isScreenOn = inGroup
+            ? group.isScreenSharing
+            : call.isScreenSharing;
         return Scaffold(
           backgroundColor: AppColors.bg,
           body: SafeArea(
@@ -60,22 +67,49 @@ class CallScreen extends StatelessWidget {
                   onMinimize: () =>
                       inGroup ? group.minimize() : call.minimize(),
                 ),
-                Expanded(child: _Grid(tiles: tiles)),
+                Expanded(
+                  child: Stack(
+                    children: [
+                      _Grid(tiles: tiles),
+                      if (isScreenOn)
+                        Positioned(
+                          top: 12,
+                          right: 20,
+                          child: _ScreenShareBadge(
+                            title: screenShareCfg?.sourceTitle ?? 'Screen',
+                            onStop: () => inGroup
+                                ? group.stopScreenShare()
+                                : call.stopScreenShare(),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 _Controls(
                   micOn: inGroup ? group.isAudio : call.isAudio,
                   cameraOn: inGroup ? group.isVideo : call.isVideo,
-                  screenOn: inGroup ? group.isScreenSharing : call.isScreenSharing,
+                  screenOn: isScreenOn,
                   onToggleMic: () =>
                       inGroup ? group.toggleMic() : call.toggleMic(),
                   onToggleCamera: () =>
                       inGroup ? group.toggleCamera() : call.toggleCamera(),
-                  onToggleScreen: () => inGroup
-                      ? (group.isScreenSharing
-                          ? group.stopScreenShare()
-                          : group.startScreenShare())
-                      : (call.isScreenSharing
-                          ? call.stopScreenShare()
-                          : call.startScreenShare()),
+                  onToggleScreen: () async {
+                    if (isScreenOn) {
+                      if (inGroup) {
+                        await group.stopScreenShare();
+                      } else {
+                        await call.stopScreenShare();
+                      }
+                      return;
+                    }
+                    final cfg = await showScreenSharePicker(context);
+                    if (cfg == null) return;
+                    if (inGroup) {
+                      await group.startScreenShare(cfg);
+                    } else {
+                      await call.startScreenShare(cfg);
+                    }
+                  },
                   onHangup: () =>
                       inGroup ? group.leaveGroupCall() : call.end(),
                 ),
@@ -109,6 +143,7 @@ class _TileData {
     required this.isLocal,
     required this.micMuted,
     this.videoTrack,
+    this.isScreenShare = false,
   });
   final String key;
   final String displayName;
@@ -117,41 +152,81 @@ class _TileData {
   final bool isLocal;
   final bool micMuted;
   final VideoTrack? videoTrack;
+
+  /// True for tiles that render a screen-share track instead of a camera/avatar.
+  /// Promoted to the front of the grid so they get the biggest cell.
+  final bool isScreenShare;
+}
+
+/// Split a participant's published video tracks into a `(camera, screen)`
+/// pair. Either may be null. Screen-share tracks are surfaced as their own
+/// tile (Discord-style) so the shared screen gets a prominent cell.
+({VideoTrack? camera, VideoTrack? screen}) _splitTracks(
+    Iterable<TrackPublication> pubs) {
+  VideoTrack? camera;
+  VideoTrack? screen;
+  for (final pub in pubs) {
+    final t = pub.track;
+    if (t is! VideoTrack) continue;
+    switch (pub.source) {
+      case TrackSource.screenShareVideo:
+        screen = t;
+        break;
+      case TrackSource.camera:
+        camera = t;
+        break;
+      default:
+        camera ??= t;
+    }
+  }
+  return (camera: camera, screen: screen);
 }
 
 List<_TileData> _buildDirectTiles(CallNotifier n) {
-  final tiles = <_TileData>[];
+  final screenTiles = <_TileData>[];
+  final cameraTiles = <_TileData>[];
   final lp = n.local;
   if (lp != null) {
-    VideoTrack? localVid;
-    for (final pub in lp.videoTrackPublications) {
-      final t = pub.track;
-      if (t is VideoTrack) {
-        // Prefer camera over screen for the local face tile.
-        localVid = t;
-        if (pub.source == TrackSource.camera) break;
-      }
+    final split = _splitTracks(lp.videoTrackPublications);
+    if (split.screen != null) {
+      screenTiles.add(_TileData(
+        key: 'local-screen',
+        displayName: n.screenShareConfig?.sourceTitle.isNotEmpty == true
+            ? 'You: ${n.screenShareConfig!.sourceTitle}'
+            : 'Your screen',
+        colorHex: '#EA580C',
+        isActiveSpeaker: false,
+        isLocal: true,
+        micMuted: !n.isAudio,
+        videoTrack: split.screen,
+        isScreenShare: true,
+      ));
     }
-    tiles.add(_TileData(
+    cameraTiles.add(_TileData(
       key: 'local',
       displayName: 'You',
       colorHex: '#EA580C',
       isActiveSpeaker: n.activeSpeakers.contains(lp.identity),
       isLocal: true,
       micMuted: !n.isAudio,
-      videoTrack: localVid,
+      videoTrack: split.camera,
     ));
   }
   for (final rp in n.remotes.values) {
-    VideoTrack? rt;
-    for (final pub in rp.videoTrackPublications) {
-      final t = pub.track;
-      if (t is VideoTrack) {
-        rt = t;
-        if (pub.source == TrackSource.camera) break;
-      }
+    final split = _splitTracks(rp.videoTrackPublications);
+    if (split.screen != null) {
+      screenTiles.add(_TileData(
+        key: 'remote-screen-${rp.sid}',
+        displayName: '${n.peer?.displayName ?? rp.name}: screen',
+        colorHex: n.peer?.avatarColor ?? '#6F7180',
+        isActiveSpeaker: false,
+        isLocal: false,
+        micMuted: !rp.isMicrophoneEnabled(),
+        videoTrack: split.screen,
+        isScreenShare: true,
+      ));
     }
-    tiles.add(_TileData(
+    cameraTiles.add(_TileData(
       key: 'remote-${rp.sid}',
       displayName: n.peer?.displayName ??
           (rp.name.isNotEmpty ? rp.name : rp.identity),
@@ -159,54 +234,68 @@ List<_TileData> _buildDirectTiles(CallNotifier n) {
       isActiveSpeaker: n.activeSpeakers.contains(rp.identity),
       isLocal: false,
       micMuted: !rp.isMicrophoneEnabled(),
-      videoTrack: rt,
+      videoTrack: split.camera,
     ));
   }
-  return tiles;
+  return [...screenTiles, ...cameraTiles];
 }
 
 List<_TileData> _buildGroupTiles(GroupCallNotifier n) {
-  final tiles = <_TileData>[];
+  final screenTiles = <_TileData>[];
+  final cameraTiles = <_TileData>[];
   final lp = n.local;
   if (lp != null) {
-    VideoTrack? localVid;
-    for (final pub in lp.videoTrackPublications) {
-      final t = pub.track;
-      if (t is VideoTrack) {
-        localVid = t;
-        if (pub.source == TrackSource.camera) break;
-      }
+    final split = _splitTracks(lp.videoTrackPublications);
+    if (split.screen != null) {
+      screenTiles.add(_TileData(
+        key: 'local-screen',
+        displayName: n.screenShareConfig?.sourceTitle.isNotEmpty == true
+            ? 'You: ${n.screenShareConfig!.sourceTitle}'
+            : 'Your screen',
+        colorHex: '#EA580C',
+        isActiveSpeaker: false,
+        isLocal: true,
+        micMuted: !n.isAudio,
+        videoTrack: split.screen,
+        isScreenShare: true,
+      ));
     }
-    tiles.add(_TileData(
+    cameraTiles.add(_TileData(
       key: 'local',
       displayName: 'You',
       colorHex: '#EA580C',
       isActiveSpeaker: n.activeSpeakers.contains(lp.identity),
       isLocal: true,
       micMuted: !n.isAudio,
-      videoTrack: localVid,
+      videoTrack: split.camera,
     ));
   }
   for (final rp in n.remotes.values) {
-    VideoTrack? rt;
-    for (final pub in rp.videoTrackPublications) {
-      final t = pub.track;
-      if (t is VideoTrack) {
-        rt = t;
-        if (pub.source == TrackSource.camera) break;
-      }
+    final split = _splitTracks(rp.videoTrackPublications);
+    if (split.screen != null) {
+      screenTiles.add(_TileData(
+        key: 'remote-screen-${rp.sid}',
+        displayName:
+            '${rp.name.isNotEmpty ? rp.name : rp.identity}: screen',
+        colorHex: '#6F7180',
+        isActiveSpeaker: false,
+        isLocal: false,
+        micMuted: !rp.isMicrophoneEnabled(),
+        videoTrack: split.screen,
+        isScreenShare: true,
+      ));
     }
-    tiles.add(_TileData(
+    cameraTiles.add(_TileData(
       key: 'remote-${rp.sid}',
       displayName: rp.name.isNotEmpty ? rp.name : rp.identity,
       colorHex: '#6F7180',
       isActiveSpeaker: n.activeSpeakers.contains(rp.identity),
       isLocal: false,
       micMuted: !rp.isMicrophoneEnabled(),
-      videoTrack: rt,
+      videoTrack: split.camera,
     ));
   }
-  return tiles;
+  return [...screenTiles, ...cameraTiles];
 }
 
 class _Header extends StatelessWidget {
@@ -270,12 +359,81 @@ class _Grid extends StatelessWidget {
             style: TextStyle(color: AppColors.ink2)),
       );
     }
+    final screens = tiles.where((t) => t.isScreenShare).toList();
+    final people = tiles.where((t) => !t.isScreenShare).toList();
+
+    // Discord-style: when a screen is shared, devote the top region to the
+    // shared screens and reduce the camera/avatar gallery to a strip below.
+    if (screens.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: LayoutBuilder(builder: (context, c) {
+          final screenCols = screens.length == 1 ? 1 : 2;
+          return Column(
+            children: [
+              Expanded(
+                flex: 7,
+                child: GridView.builder(
+                  itemCount: screens.length,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: screenCols,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 16 / 9,
+                  ),
+                  itemBuilder: (_, i) {
+                    final t = screens[i];
+                    return CallParticipantTile(
+                      key: ValueKey(t.key),
+                      displayName: t.displayName,
+                      avatarColorHex: t.colorHex,
+                      isActiveSpeaker: t.isActiveSpeaker,
+                      videoTrack: t.videoTrack,
+                      isLocal: t.isLocal,
+                      micMuted: t.micMuted,
+                      isScreenShare: t.isScreenShare,
+                    );
+                  },
+                ),
+              ),
+              if (people.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                SizedBox(
+                  height: 110,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: people.length,
+                    separatorBuilder: (_, _) => const SizedBox(width: 10),
+                    itemBuilder: (_, i) {
+                      final t = people[i];
+                      return AspectRatio(
+                        aspectRatio: 16 / 10,
+                        child: CallParticipantTile(
+                          key: ValueKey(t.key),
+                          displayName: t.displayName,
+                          avatarColorHex: t.colorHex,
+                          isActiveSpeaker: t.isActiveSpeaker,
+                          videoTrack: t.videoTrack,
+                          isLocal: t.isLocal,
+                          micMuted: t.micMuted,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ],
+          );
+        }),
+      );
+    }
+
     return LayoutBuilder(builder: (context, c) {
-      final cols = _columnsFor(tiles.length, c.maxWidth);
+      final cols = _columnsFor(people.length, c.maxWidth);
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         child: GridView.builder(
-          itemCount: tiles.length,
+          itemCount: people.length,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: cols,
             mainAxisSpacing: 12,
@@ -283,7 +441,7 @@ class _Grid extends StatelessWidget {
             childAspectRatio: 16 / 10,
           ),
           itemBuilder: (_, i) {
-            final t = tiles[i];
+            final t = people[i];
             return CallParticipantTile(
               key: ValueKey(t.key),
               displayName: t.displayName,
@@ -355,7 +513,8 @@ class _Controls extends StatelessWidget {
           _CtrlButton(
             icon: screenOn ? Icons.stop_screen_share : Icons.screen_share,
             active: screenOn,
-            label: screenOn ? 'Stop sharing' : 'Share screen',
+            label: screenOn ? 'Sharing' : 'Share screen',
+            highlighted: screenOn,
             onTap: onToggleScreen,
           ),
           const SizedBox(width: 24),
@@ -379,6 +538,7 @@ class _CtrlButton extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.danger = false,
+    this.highlighted = false,
   });
   final IconData icon;
   final bool active;
@@ -386,19 +546,40 @@ class _CtrlButton extends StatelessWidget {
   final VoidCallback onTap;
   final bool danger;
 
+  /// When true, paint the button as a primary "live" affordance — ember-filled
+  /// with a stronger glow. Used for the screen-share button while sharing so
+  /// it stands out from the muted/unmuted variants.
+  final bool highlighted;
+
   @override
   Widget build(BuildContext context) {
     final Color bg;
     final Color fg;
+    final Color border;
+    List<BoxShadow>? shadow;
     if (danger) {
       bg = AppColors.err;
       fg = Colors.white;
+      border = AppColors.err;
+    } else if (highlighted) {
+      bg = AppColors.ember;
+      fg = Colors.white;
+      border = AppColors.emberSoft;
+      shadow = [
+        BoxShadow(
+          color: AppColors.ember.withValues(alpha: 0.35),
+          blurRadius: 16,
+          spreadRadius: 1,
+        ),
+      ];
     } else if (active) {
       bg = AppColors.raised;
       fg = AppColors.ink1;
+      border = AppColors.line;
     } else {
       bg = AppColors.err.withValues(alpha: 0.18);
       fg = AppColors.err;
+      border = AppColors.line;
     }
     return Tooltip(
       message: label,
@@ -412,9 +593,93 @@ class _CtrlButton extends StatelessWidget {
           decoration: BoxDecoration(
             color: bg,
             shape: BoxShape.circle,
-            border: Border.all(color: AppColors.line),
+            border: Border.all(color: border),
+            boxShadow: shadow,
           ),
           child: Icon(icon, color: fg, size: 24),
+        ),
+      ),
+    );
+  }
+}
+
+/// Floating overlay in the top-right of the call stage announcing that screen
+/// sharing is live, with a quick stop affordance. Mirrors Zoom/Discord's
+/// "you are sharing" chip.
+class _ScreenShareBadge extends StatelessWidget {
+  const _ScreenShareBadge({required this.title, required this.onStop});
+  final String title;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+        decoration: BoxDecoration(
+          color: AppColors.panel,
+          borderRadius: BorderRadius.circular(AppRadii.rMd),
+          border: Border.all(
+            color: AppColors.ember.withValues(alpha: 0.55),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.ember.withValues(alpha: 0.18),
+              blurRadius: 18,
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: const BoxDecoration(
+                color: AppColors.ember,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              'Sharing',
+              style: TextStyle(
+                color: AppColors.ink1,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 240),
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.ink2,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: onStop,
+              child: Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: AppColors.err.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.stop_rounded,
+                    size: 18, color: AppColors.err),
+              ),
+            ),
+          ],
         ),
       ),
     );

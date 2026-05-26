@@ -17,6 +17,7 @@ class CallParticipantTile extends StatefulWidget {
     this.videoTrack,
     this.isLocal = false,
     this.micMuted = false,
+    this.isScreenShare = false,
   });
 
   /// Camera or screen-share VideoTrack to render. Null falls back to avatar.
@@ -26,6 +27,10 @@ class CallParticipantTile extends StatefulWidget {
   final bool isActiveSpeaker;
   final bool isLocal;
   final bool micMuted;
+
+  /// When true, render with `fit: contain` and never mirror — captured
+  /// screens have arbitrary aspect ratios and mirroring breaks the layout.
+  final bool isScreenShare;
 
   @override
   State<CallParticipantTile> createState() => _CallParticipantTileState();
@@ -74,12 +79,17 @@ class _CallParticipantTileState extends State<CallParticipantTile>
             fit: StackFit.expand,
             children: [
               if (hasVideo)
-                VideoTrackRenderer(
-                  widget.videoTrack!,
-                  fit: VideoViewFit.cover,
-                  mirrorMode: widget.isLocal
-                      ? VideoViewMirrorMode.mirror
-                      : VideoViewMirrorMode.off,
+                Container(
+                  color: widget.isScreenShare ? Colors.black : null,
+                  child: VideoTrackRenderer(
+                    widget.videoTrack!,
+                    fit: widget.isScreenShare
+                        ? VideoViewFit.contain
+                        : VideoViewFit.cover,
+                    mirrorMode: (widget.isLocal && !widget.isScreenShare)
+                        ? VideoViewMirrorMode.mirror
+                        : VideoViewMirrorMode.off,
+                  ),
                 )
               else
                 _AvatarFallback(
